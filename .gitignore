@@ -1,0 +1,12 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+stackscan-release.keystore

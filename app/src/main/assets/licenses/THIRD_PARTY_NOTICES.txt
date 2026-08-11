@@ -1,0 +1,45 @@
+StackScan — Third-Party Notices
+===============================
+Kode StackScan sendiri dilisensikan Apache License 2.0 (file LICENSE
+di repositori proyek). Aplikasi ini juga memakai pustaka/lisensi berikut;
+hak cipta tetap milik pemilik masing-masing. Teks lisensi lengkap tersedia
+di folder licenses/ dalam aplikasi ini (Apache-2.0.txt, LGPL-2.1.txt,
+CDDL-1.0.txt).
+
+1) OpenCV 4.13 — Apache License 2.0
+   Copyright (C) OpenCV team (Intel, Itseez/OpenCV.org, dan kontributor).
+   https://opencv.org
+   Dipakai untuk: alignment gambar (ECC), deteksi bintang, blending,
+   resize/sharpening, dan pemrosesan piksel.
+
+2) LibRaw 0.21.3 — GNU LGPL v2.1 ATAU CDDL v1.0 (pilih salah satu)
+   Copyright (C) 2008-2021 LibRaw LLC (http://www.libraw.org)
+   Dipakai untuk: decode file RAW/DNG (NEF, ARW, CR2, dst) via JNI.
+   Kode LibRaw dikompilasi statis ke librawdecoder.so; sumber utuh dan
+   tanpa modifikasi disertakan di repositori proyek
+   (app/src/main/cpp/libraw/) bersama skrip build untuk relink.
+   LibRaw memuat kode dcraw.c oleh Dave Coffin (1997-2018), DCB/FBDD
+   oleh Jacek Gozdz (lisensi BSD 3-clause), X3F oleh Roland Karlsson
+   (lisensi BSD), serta potongan Adobe DNG SDK (Adobe Systems, MIT).
+   Lihat file COPYRIGHT di app/src/main/cpp/libraw/ untuk kredit lengkap.
+
+3) LLVM libc++ (Android NDK r26) — Apache 2.0 + LLVM exception
+   Copyright (C) LLVM Project. https://llvm.org
+   Pustaka C++ standar yang dipakai librawdecoder.so.
+
+4) Jetpack AndroidX & Jetpack Compose (Material 3) — Apache License 2.0
+   Copyright (C) Google LLC
+   Termasuk: Compose UI/Material3, Activity, Lifecycle,
+   Core/ktx, ExifInterface, material-icons-core.
+
+5) Kotlin & Kotlinx Coroutines — Apache License 2.0
+   Copyright (C) JetBrains s.r.o.
+
+6) Gradle & Android Gradle Plugin — Apache License 2.0
+   Copyright (C) Gradle Inc. & Google LLC.
+   (Alat build; tidak ikut terdistribusi di dalam APK.)
+
+7) Konsep stacking astronomi
+   Logika stacking (align, kappa-sigma, light pollution reduction,
+   dll.) adalah metode standar astronomi/fotografi yang sudah dikenal
+   umum. StackScan tidak berafiliasi dengan lembaga/instansi mana pun.
