@@ -34,6 +34,7 @@ import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.core.TermCriteria
 import org.opencv.imgproc.Imgproc
+import org.opencv.imgproc.Moments
 import org.opencv.video.Video
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -66,6 +67,16 @@ object ImageStacker {
     // saat di-stack (lighten/kappa-sigma mengawetkan jejak sub-piksel tsb).
     private const val STAR_REFINE_RESIDUAL_PX = 0.6
     private const val MAX_STAR_ALIGN_RESIDUAL_PX = 1.5
+    // Deteksi trail bintang: frame dengan elongasi jauh di atas median set dibuang
+    // sebelum align, dan anchor alignment hanya memakai bintang bulat (centroid
+    // stabil). Bila hampir semua frame memanjang, tidak ada yang dibuang — hanya
+    // peringatan — agar stacking tidak kosong.
+    private const val ROUND_STAR_ELONG_MAX = 2.0
+    private const val TRAIL_SKIP_ELONG_MIN = 3.0
+    private const val TRAIL_SKIP_OUTLIER_FACTOR = 1.6
+    private const val TRAIL_WARN_ELONG = 2.5
+    private const val TRAIL_STREAM_SKIP_ELONG = 5.0
+    private const val MIN_FRAMES_AFTER_TRAIL_SKIP = 3
     private val ECC_REFINE_CRITERIA = TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 30, 1e-4)
     private var iccCache: Map<OutputColorSpace, ByteArray>? = null
 
@@ -193,7 +204,28 @@ object ImageStacker {
                 grays.add(gray)
             }
 
-            val refIndex = pickReferenceIndex(grays, astroMode)
+            // Deteksi trail bintang (astro): frame dengan elongasi jauh di atas
+            // median set dibuang sebelum align, dan frame acuan dipilih dari sisa
+            // set agar bintang yang memanjang tidak menodai transform.
+            val trailScores = if (astroMode) grays.map { frameTrailScore(it) } else emptyList()
+            val trailSkips = if (astroMode) trailSkipSet(trailScores) else emptySet()
+            val refIndex = pickReferenceIndex(grays, astroMode, trailSkips, trailScores)
+            if (trailSkips.isNotEmpty()) {
+                Log.w(TAG, "Trail detect: ${trailSkips.size} frame dibuang (elongasi > ambang) sebelum stacking.")
+            }
+            val sortedTrail = trailScores.sorted()
+            val medianTrail = if (sortedTrail.isEmpty()) 1.0 else {
+                if (sortedTrail.size % 2 == 1) sortedTrail[sortedTrail.size / 2]
+                else (sortedTrail[sortedTrail.size / 2 - 1] + sortedTrail[sortedTrail.size / 2]) / 2.0
+            }
+            if (astroMode && medianTrail > TRAIL_WARN_ELONG) {
+                Log.w(
+                    TAG,
+                    "PERINGATAN TRAIL: elongasi bintang median ${"%.1f".format(medianTrail)}x — SEMUA frame memanjang. " +
+                        "Hasil stack akan ikut memanjang. Gunakan shutter \u2264 2 dtk dan ISO lebih tinggi (bintang bulat) " +
+                        "agar StackScan bisa menghasilkan bintang yang tajam.",
+                )
+            }
             if (refIndex != 0) {
                 Log.i(TAG, "Frame acuan dipilih: #$refIndex (bukan #0) — berdasarkan kualitas/star count.")
             }
@@ -225,6 +257,11 @@ object ImageStacker {
             var processed = 0
             for (i in frameMats.indices) {
                 if (i == refIndex) continue
+                if (trailSkips.isNotEmpty() && i in trailSkips) {
+                    Log.w(TAG, "Frame #$i dibuang sebelum align: elongasi trail ${"%.1f".format(trailScores[i])}x > ambang.")
+                    processed++
+                    continue
+                }
                 processed++
                 onProgress(
                     0.05f + 0.45f * (processed - 1) / (frameMats.size - 1),
@@ -1280,6 +1317,23 @@ object ImageStacker {
             val mat = loadFrameMat(context, uri, maxDim, removeHotPixels, dark, flat) ?: return null
             val gray = Mat()
             Imgproc.cvtColor(mat, gray, Imgproc.COLOR_BGR2GRAY)
+            val trailScore = if (astroMode) frameTrailScore(gray) else 1.0
+            if (astroMode && trailScore > TRAIL_STREAM_SKIP_ELONG) {
+                Log.w(
+                    TAG,
+                    "Frame trail ekstrem (elongasi ${"%.1f".format(trailScore)}x) dibuang — " +
+                        "melebihi batas $TRAIL_STREAM_SKIP_ELONG (frame goyang/rusak).",
+                )
+                gray.release()
+                mat.release()
+                return null
+            } else if (astroMode && trailScore > TRAIL_WARN_ELONG) {
+                Log.w(
+                    TAG,
+                    "PERINGATAN TRAIL: frame memanjang ${"%.1f".format(trailScore)}x — hasil stack bisa ikut " +
+                        "memanjang. Gunakan shutter \u2264 2 dtk / ISO lebih tinggi agar bintang bulat.",
+                )
+            }
             val grayRef = sameSizeAsReference(referenceGray, gray)
             val skyWarp = if (astroMode) {
                 starWarp(referenceGray, grayRef)
@@ -1391,23 +1445,39 @@ object ImageStacker {
     private fun exposureFactorFor(data: FloatArray, refLum: Double): Double =
         (refLum / luminanceOf(data).coerceAtLeast(0.001)).coerceIn(0.5, 2.0)
 
-    private fun pickReferenceIndex(grays: List<Mat>, astroMode: Boolean): Int {
+    private fun pickReferenceIndex(
+        grays: List<Mat>,
+        astroMode: Boolean,
+        excluded: Set<Int> = emptySet(),
+        trailScores: List<Double>? = null,
+    ): Int {
         if (grays.size <= 1) return 0
-        var best = 0
+        var best = -1
         var bestScore = Double.NEGATIVE_INFINITY
-        for (i in grays.indices) {
-            val score = if (astroMode) {
-                // Astro: jumlah bintang paling penting, tekstur sebagai tie-break.
-                findStarPoints(grays[i]).size.toDouble() * 100.0 + textureScore(grays[i])
-            } else {
-                textureScore(grays[i])
+        // Pass 0: pilih dari frame yang tidak dibuang trail. Pass 1: fallback
+        // (tak mungkin terjadi normalnya) bila semua frame tereksklusi.
+        for (pass in 0..1) {
+            for (i in grays.indices) {
+                if (pass == 0 && i in excluded) continue
+                val base = if (astroMode) {
+                    // Astro: jumlah bintang paling penting, tekstur sebagai tie-break.
+                    findStarPoints(grays[i]).size.toDouble() * 100.0 + textureScore(grays[i])
+                } else {
+                    textureScore(grays[i])
+                }
+                // Hukuman elongasi: frame acuan yang memanjang menularkan trail-nya
+                // ke seluruh hasil stack, jadi preferensikan frame berbintang bulat.
+                val trail = trailScores?.getOrNull(i) ?: 1.0
+                val penalty = if (astroMode) max(0.0, trail - 1.2) * 300.0 else 0.0
+                val score = base - penalty
+                if (score > bestScore) {
+                    bestScore = score
+                    best = i
+                }
             }
-            if (score > bestScore) {
-                bestScore = score
-                best = i
-            }
+            if (best >= 0) return best
         }
-        return best
+        return 0
     }
 
     private fun textureScore(gray: Mat): Double {
@@ -1505,8 +1575,8 @@ object ImageStacker {
     }
 
     private fun starWarp(reference: Mat, moving: Mat): Mat? {
-        val refStars = findStarPoints(reference)
-        val movStars = findStarPoints(moving)
+        val refStars = findStarBlobs(reference)
+        val movStars = findStarBlobs(moving)
         if (refStars.size < MIN_STARS_COUNT || movStars.size < MIN_STARS_COUNT) {
             Log.w(
                 TAG,
@@ -1515,18 +1585,35 @@ object ImageStacker {
             return null
         }
 
+        // Anchor hanya bintang bulat: centroidnya stabil, sedangkan inti saturasi
+        // yang memanjang punya centroid bias di sepanjang sumbu trail sehingga
+        // menarik transform ke arah yang salah. Fallback ke semua blob bila bintang
+        // bulatnya kurang dari minimum (mis. semua frame memang trail).
+        val refRound = refStars.filter { it.elongation <= ROUND_STAR_ELONG_MAX }
+        val movRound = movStars.filter { it.elongation <= ROUND_STAR_ELONG_MAX }
+        val roundAnchors = refRound.size >= MIN_STARS_COUNT && movRound.size >= MIN_STARS_COUNT
+        val refAnchors = if (roundAnchors) refRound else refStars
+        val movAnchors = if (roundAnchors) movRound else movStars
+        if (!roundAnchors) {
+            Log.w(
+                TAG,
+                "Star align: bintang bulat < $MIN_STARS_COUNT (acuan=${refRound.size}, frame=${movRound.size}); " +
+                    "pakai anchor campuran (hasil bisa kurang presisi di bintang memanjang).",
+            )
+        }
+
         val pairRef = ArrayList<Point>()
         val pairMov = ArrayList<Point>()
-        val used = BooleanArray(movStars.size)
+        val used = BooleanArray(movAnchors.size)
 
-        for (refStar in refStars) {
+        for (refStar in refAnchors) {
             var bestIndex = -1
             var bestDist = MAX_STAR_MATCH_DIST
             var secondIndex = -1
             var secondDist = MAX_STAR_MATCH_DIST
-            for (j in movStars.indices) {
+            for (j in movAnchors.indices) {
                 if (used[j]) continue
-                val d = hypot(refStar.x - movStars[j].x, refStar.y - movStars[j].y)
+                val d = hypot(refStar.x - movAnchors[j].x, refStar.y - movAnchors[j].y)
                 if (d < bestDist) {
                     secondIndex = bestIndex
                     secondDist = bestDist
@@ -1541,8 +1628,8 @@ object ImageStacker {
             // rotasi frame beberapa derajat tidak langsung mematahkan pencocokan.
             if (bestIndex >= 0 && (secondIndex < 0 || bestDist < secondDist * STAR_MATCH_RATIO)) {
                 used[bestIndex] = true
-                pairRef.add(refStar)
-                pairMov.add(movStars[bestIndex])
+                pairRef.add(Point(refStar.x, refStar.y))
+                pairMov.add(Point(movAnchors[bestIndex].x, movAnchors[bestIndex].y))
             }
         }
 
@@ -1611,7 +1698,8 @@ object ImageStacker {
                             "Star align: pasangan=${pairRef.size}, inliers=$inlierCount " +
                                 "(${100.0 * inlierCount / pairRef.size.coerceAtLeast(1)}%), " +
                                 "residual=${"%.2f".format(finalResidual ?: 0.0)}px" +
-                                (if (useRefined) " (diperhalus ECC)" else "") + ".",
+                                (if (useRefined) " (diperhalus ECC)" else "") +
+                                (if (roundAnchors) " (anchor bulat)" else " (anchor campuran)") + ".",
                         )
                         finalWarp
                     }
@@ -1681,7 +1769,9 @@ object ImageStacker {
         }
     }
 
-    private fun findStarPoints(gray: Mat): List<Point> {
+    private data class StarBlob(val x: Double, val y: Double, val area: Double, val elongation: Double)
+
+    private fun findStarBlobs(gray: Mat): List<StarBlob> {
         return try {
             val binary = Mat()
             if (gray.depth() == CvType.CV_32F) {
@@ -1700,23 +1790,98 @@ object ImageStacker {
             val contours = ArrayList<MatOfPoint>()
             val hierarchy = Mat()
             Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-            val points = ArrayList<Point>()
+            val blobs = ArrayList<StarBlob>()
             for (contour in contours) {
                 val area = Imgproc.contourArea(contour)
                 if (area in 2.0..400.0) {
                     val moments = Imgproc.moments(contour)
                     if (moments.m00 > 0.0) {
-                        points.add(Point(moments.m10 / moments.m00, moments.m01 / moments.m00))
+                        blobs.add(
+                            StarBlob(
+                                moments.m10 / moments.m00,
+                                moments.m01 / moments.m00,
+                                area,
+                                blobElongation(moments),
+                            ),
+                        )
                     }
                 }
                 contour.release()
             }
             binary.release()
             hierarchy.release()
-            points
+            blobs
         } catch (t: Throwable) {
             emptyList()
         }
+    }
+
+    private fun findStarPoints(gray: Mat): List<Point> =
+        findStarBlobs(gray).map { Point(it.x, it.y) }
+
+    /**
+     * Rasio sumbu utama (>= 1.0) sebuah blob dari momen orde-2; 1.0 = bulat,
+     * makin besar = makin memanjang.
+     */
+    private fun blobElongation(moments: Moments): Double {
+        val mu20 = moments.mu20 / moments.m00
+        val mu02 = moments.mu02 / moments.m00
+        val mu11 = moments.mu11 / moments.m00
+        val trace = mu20 + mu02
+        val disc = sqrt(((mu20 - mu02) / 2.0).pow(2) + mu11 * mu11)
+        val lamMax = trace / 2.0 + disc
+        val lamMin = max(trace / 2.0 - disc, 1e-6)
+        return sqrt(lamMax / lamMin)
+    }
+
+    /**
+     * Skor trail sebuah frame: elongasi maksimum blob terang (ambang 35% dari
+     * puncak kecerahan, saringan ukuran agar bulan/langit terang tidak terhitung).
+     * Bintang bulat -> ~1,0-1,8; trail panjang -> 3+.
+     */
+    private fun frameTrailScore(gray: Mat): Double {
+        return try {
+            if (gray.depth() != CvType.CV_8U) return 1.0
+            val maxVal = Core.minMaxLoc(gray).maxVal
+            if (maxVal < 64.0) return 1.0
+            val binary = Mat()
+            Imgproc.threshold(gray, binary, maxVal * 0.35, 255.0, Imgproc.THRESH_BINARY)
+            val contours = ArrayList<MatOfPoint>()
+            val hierarchy = Mat()
+            Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+            val maxStarArea = gray.cols() * gray.rows() * 0.0015
+            var score = 1.0
+            for (contour in contours) {
+                val moments = Imgproc.moments(contour)
+                if (moments.m00 in 8.0..maxStarArea) {
+                    score = max(score, blobElongation(moments))
+                }
+                contour.release()
+            }
+            binary.release()
+            hierarchy.release()
+            score
+        } catch (t: Throwable) {
+            1.0
+        }
+    }
+
+    /**
+     * Frame dengan trail jauh lebih parah daripada median set dibuang. Bila hampir
+     * semua frame memanjang (mis. semua memakai mode malam), tidak ada yang dibuang
+     * agar stacking tetap jalan; peringatan ditulis oleh pemanggil.
+     */
+    private fun trailSkipSet(scores: List<Double>): Set<Int> {
+        if (scores.size < MIN_FRAMES_AFTER_TRAIL_SKIP) return emptySet()
+        val sorted = scores.sorted()
+        val median = if (sorted.size % 2 == 1) {
+            sorted[sorted.size / 2]
+        } else {
+            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0
+        }
+        val threshold = max(TRAIL_SKIP_ELONG_MIN, median * TRAIL_SKIP_OUTLIER_FACTOR)
+        val skips = scores.indices.filter { scores[it] > threshold }.toSet()
+        return if (scores.size - skips.size < MIN_FRAMES_AFTER_TRAIL_SKIP) emptySet() else skips
     }
 
     private fun maxStack(frames: List<Mat>, factors: DoubleArray): Mat {
