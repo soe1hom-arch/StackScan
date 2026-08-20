@@ -61,6 +61,12 @@ object ImageStacker {
     // (hingga beberapa derajat di tepi) tetap bisa dicocokkan, bukan langsung jatuh ke ECC.
     private const val MAX_STAR_MATCH_DIST = 150.0
     private const val STAR_MATCH_RATIO = 0.75
+    // Refinement & kontrol kualitas alignment bintang: residual inlier (px) yang
+    // tidak bisa dihilangkan oleh affine RANSAC membuat bintang tampak memanjang
+    // saat di-stack (lighten/kappa-sigma mengawetkan jejak sub-piksel tsb).
+    private const val STAR_REFINE_RESIDUAL_PX = 0.6
+    private const val MAX_STAR_ALIGN_RESIDUAL_PX = 1.5
+    private val ECC_REFINE_CRITERIA = TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 30, 1e-4)
     private var iccCache: Map<OutputColorSpace, ByteArray>? = null
 
     private fun iccAsset(context: Context, name: String): ByteArray = try {
@@ -1547,13 +1553,12 @@ object ImageStacker {
             val to = MatOfPoint2f(*pairMov.toTypedArray())
             val inliers = MatOfByte()
             val affine = Calib3d.estimateAffinePartial2D(from, to, inliers, Calib3d.RANSAC, 3.0)
-            if (!affine.empty()) {
-                val inlierCount = (inliers.toArray().count { it.toInt() != 0 })
-                Log.i(
-                    TAG,
-                    "Star align: pasangan=${pairRef.size}, inliers=$inlierCount " +
-                        "(${100.0 * inlierCount / pairRef.size.coerceAtLeast(1)}%).",
-                )
+            if (affine.empty()) {
+                affine.release()
+                null
+            } else {
+                val inlierFlags = inliers.toArray()
+                val inlierCount = inlierFlags.count { it.toInt() != 0 }
                 if (!warpSane(affine, reference.cols(), reference.rows())) {
                     val st = warpStats(affine)
                     Log.w(
@@ -1563,13 +1568,115 @@ object ImageStacker {
                     affine.release()
                     null
                 } else {
-                    affine
+                    val residual = starAlignResidualPx(affine, pairRef, pairMov, inlierFlags)
+                    // Bila residual inlier masih di atas ambang, perhalus sub-piksel
+                    // dengan ECC yang di-seed dari warp bintang (residual < ~0,3px).
+                    val refined = if (residual != null && residual > STAR_REFINE_RESIDUAL_PX) {
+                        refineStarWarp(reference, moving, affine)
+                    } else {
+                        null
+                    }
+                    val finalWarp: Mat
+                    val finalResidual: Double?
+                    var useRefined = false
+                    if (refined != null && residual != null) {
+                        val refinedResidual = starAlignResidualPx(refined, pairRef, pairMov, inlierFlags)
+                        if (refinedResidual == null || refinedResidual <= residual + 0.05) {
+                            // Refinement diterima bila residual tidak memburuk.
+                            finalWarp = refined
+                            finalResidual = refinedResidual ?: residual
+                            useRefined = true
+                        } else {
+                            finalWarp = affine
+                            finalResidual = residual
+                        }
+                    } else {
+                        finalWarp = affine
+                        finalResidual = residual
+                    }
+                    if (!useRefined) refined?.release()
+                    if (useRefined) affine.release()
+
+                    if (finalResidual != null && finalResidual > MAX_STAR_ALIGN_RESIDUAL_PX) {
+                        Log.w(
+                            TAG,
+                            "Star align ditolak: residual bintang ${"%.2f".format(finalResidual)}px > " +
+                                "$MAX_STAR_ALIGN_RESIDUAL_PX px (frame tidak presisi, dilewati).",
+                        )
+                        finalWarp.release()
+                        null
+                    } else {
+                        Log.i(
+                            TAG,
+                            "Star align: pasangan=${pairRef.size}, inliers=$inlierCount " +
+                                "(${100.0 * inlierCount / pairRef.size.coerceAtLeast(1)}%), " +
+                                "residual=${"%.2f".format(finalResidual ?: 0.0)}px" +
+                                (if (useRefined) " (diperhalus ECC)" else "") + ".",
+                        )
+                        finalWarp
+                    }
                 }
-            } else {
-                affine.release()
-                null
             }
         } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Median jarak (px) antara posisi bintang terprediksi oleh warp affine dan posisi
+     * bintang yang benar-benar terdeteksi, dihitung hanya untuk inlier RANSAC.
+     * Nilai ini = sisa ketidaksejajaran yang tidak mampu dimodelkan affine RANSAC
+     * (noise deteksi, aberasi/distorsi lensa); sumber utama bintang memanjang.
+     */
+    private fun starAlignResidualPx(
+        warp: Mat,
+        pairRef: List<Point>,
+        pairMov: List<Point>,
+        inlierFlags: ByteArray,
+    ): Double? {
+        val a00 = warp.get(0, 0)[0]
+        val a01 = warp.get(0, 1)[0]
+        val a02 = warp.get(0, 2)[0]
+        val a10 = warp.get(1, 0)[0]
+        val a11 = warp.get(1, 1)[0]
+        val a12 = warp.get(1, 2)[0]
+        val n = minOf(pairRef.size, pairMov.size)
+        val errors = DoubleArray(n)
+        var count = 0
+        for (i in 0 until n) {
+            if (i >= inlierFlags.size || inlierFlags[i].toInt() == 0) continue
+            val ex = a00 * pairRef[i].x + a01 * pairRef[i].y + a02 - pairMov[i].x
+            val ey = a10 * pairRef[i].x + a11 * pairRef[i].y + a12 - pairMov[i].y
+            errors[count++] = hypot(ex, ey)
+        }
+        if (count == 0) return null
+        errors.sort(0, count)
+        return if (count % 2 == 1) {
+            errors[count / 2]
+        } else {
+            (errors[count / 2 - 1] + errors[count / 2]) / 2.0
+        }
+    }
+
+    /**
+     * Refinement ECC (MOTION_AFFINE) yang di-seed dari warp bintang: memperbaiki
+     * sisa ketidaksejajaran sub-piksel sebelum frame di-warp & di-stack.
+     */
+    private fun refineStarWarp(reference: Mat, moving: Mat, seed: Mat): Mat? {
+        val warp = Mat()
+        seed.convertTo(warp, CvType.CV_32F)
+        return try {
+            val score = Video.findTransformECC(reference, moving, warp, Video.MOTION_AFFINE, ECC_REFINE_CRITERIA)
+            if (!warpSane(warp, reference.cols(), reference.rows())) {
+                Log.w(TAG, "ECC refine ditolak: transform tidak masuk akal setelah refinement.")
+                warp.release()
+                null
+            } else {
+                Log.i(TAG, "ECC refine: score=${"%.4f".format(score)}, warp=${warpSummary(warp)}.")
+                warp
+            }
+        } catch (t: Throwable) {
+            warp.release()
             null
         }
     }

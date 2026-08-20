@@ -20,8 +20,10 @@ package com.stackscan.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,14 +45,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -80,14 +74,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stackscan.processing.BitmapLoader
+import com.stackscan.R
 import com.stackscan.processing.ImageStacker
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -181,12 +179,36 @@ fun StackScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("StackScan", fontWeight = FontWeight.Bold)
-                        Text(
-                            "Stacking foto: serangga, makro, astro",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    Brush.linearGradient(
+                                        listOf(Color(0xFF22315E), Color(0xFF0B1022)),
+                                    ),
+                                )
+                                .border(1.dp, Color(0x3377D2FF), RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painterResource(R.drawable.ic_frame_stack),
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
+                        Column {
+                            Text("StackScan", fontWeight = FontWeight.Bold)
+                            Text(
+                                "Stacking foto: serangga, makro, astro",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -195,7 +217,7 @@ fun StackScreen(
                     }
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Menu lainnya")
+                            Icon(painterResource(R.drawable.ic_more), contentDescription = "Menu lainnya")
                         }
                         DropdownMenu(
                             expanded = menuOpen,
@@ -208,7 +230,7 @@ fun StackScreen(
                                     showHistory = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.CheckCircle, contentDescription = null)
+                                    Icon(painterResource(R.drawable.ic_layers), contentDescription = null)
                                 },
                             )
                             DropdownMenuItem(
@@ -218,7 +240,7 @@ fun StackScreen(
                                     showGuide = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Info, contentDescription = null)
+                                    Icon(painterResource(R.drawable.ic_info), contentDescription = null)
                                 },
                             )
                             DropdownMenuItem(
@@ -228,7 +250,7 @@ fun StackScreen(
                                     showLicense = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Info, contentDescription = null)
+                                    Icon(painterResource(R.drawable.ic_info), contentDescription = null)
                                 },
                             )
                         }
@@ -338,7 +360,7 @@ fun StackScreen(
 @Composable
 private fun PickSection(hasPhotos: Boolean, onPickImages: () -> Unit) {
     OutlinedButton(onClick = onPickImages, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-        Icon(Icons.Default.Add, contentDescription = null)
+        Icon(painterResource(R.drawable.ic_add), contentDescription = null)
         Spacer(Modifier.width(6.dp))
         Text(if (hasPhotos) "Tambah Foto" else "Pilih Foto")
     }
@@ -474,7 +496,7 @@ private fun ThumbnailItem(index: Int, uri: Uri, onRemove: () -> Unit) {
                     .background(MaterialTheme.colorScheme.surface, CircleShape),
             ) {
                 Icon(
-                    Icons.Default.Delete,
+                    painterResource(R.drawable.ic_delete),
                     contentDescription = "Hapus foto ${index + 1}",
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.error,
@@ -496,7 +518,7 @@ private fun EmptyStateCard() {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(Icons.Default.Info, contentDescription = null)
+            Icon(painterResource(R.drawable.ic_info), contentDescription = null)
             Text(
                 "Belum ada foto. Pilih minimal 2 foto dari scene yang sama — 17+ foto otomatis Mode Pro streaming (tanpa batas).",
                 style = MaterialTheme.typography.bodyMedium,
@@ -516,7 +538,7 @@ private fun WarningCard(warning: String) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
+            Icon(painterResource(R.drawable.ic_warning), contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
             Text(warning, color = MaterialTheme.colorScheme.onTertiaryContainer)
         }
     }
@@ -565,7 +587,7 @@ private fun ResultCard(
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.Default.CheckCircle,
+                    painterResource(R.drawable.ic_check_circle),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                 )
@@ -630,7 +652,7 @@ private fun ResultCard(
                     }
                     context.startActivity(Intent.createChooser(intent, "Bagikan hasil"))
                 }) {
-                    Icon(Icons.Default.Share, contentDescription = null)
+                    Icon(painterResource(R.drawable.ic_share), contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text("Bagikan")
                 }
@@ -643,7 +665,7 @@ private fun ResultCard(
                         }
                         context.startActivity(Intent.createChooser(intent, "Bagikan TIFF 16-bit"))
                     }) {
-                        Icon(Icons.Default.Share, contentDescription = null)
+                        Icon(painterResource(R.drawable.ic_share), contentDescription = null)
                         Spacer(Modifier.width(6.dp))
                         Text("Bagikan TIFF")
                     }
@@ -719,75 +741,272 @@ private fun AboutDialog(onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Tutup") }
         },
-        title = { Text("Tentang StackScan") },
         text = {
             Column(
                 Modifier
-                    .heightIn(max = 420.dp)
+                    .heightIn(max = 540.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                Text(
-                    "StackScan menggabungkan banyak foto menjadi satu hasil yang lebih bersih — " +
-                        "untuk objek sehari-hari hingga langit malam.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    "Versi $versionName",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    "© 2026 soe1hom-arch — dilisensikan di bawah Apache License 2.0.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Text(
-                    "Pengembang",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    "soe1hom-arch — proyek open-source. Laporan masalah, saran, dan kode " +
-                        "sumber tersedia di GitHub.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(
-                    onClick = {
-                        try {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/soe1hom-arch/StackScan")),
-                            )
-                        } catch (t: Throwable) {
-                            // Browser tidak tersedia — abaikan.
-                        }
-                    },
-                ) {
-                    Text("github.com/soe1hom-arch/StackScan")
+                AboutHero(versionName)
+                AboutSection("Tentang aplikasi") {
+                    Text(
+                        "StackScan menggabungkan banyak foto menjadi satu hasil yang lebih tajam dan bersih — " +
+                            "dari objek makro sehari-hari hingga langit malam. Setiap frame diselaraskan dan " +
+                            "ditumpuk secara presisi, lalu dikoreksi untuk menghasilkan detail terbaik.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
-                Text(
-                    "Dibangun dengan OpenCV, LibRaw (decode RAW/DNG), Kotlin & Jetpack Compose. " +
-                        "Metode stacking adalah teknik standar astronomi/fotografi yang terdokumentasi publik. " +
-                        "StackScan tidak berafiliasi dengan lembaga mana pun. " +
-                        "Semua pemrosesan 100% offline di perangkat — tidak ada data yang dikirim atau dikumpulkan.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Text(
-                    "Lisensi Pihak Ketiga",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    notices ?: "Teks lisensi tidak ditemukan.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                AboutSection("Fitur utama") {
+                    AboutFeatureChips()
+                }
+                AboutSection("Teknologi") {
+                    Text(
+                        "Dibangun dengan OpenCV, LibRaw (decode RAW/DNG), Kotlin & Jetpack Compose. " +
+                            "Algoritma stacking mengikuti teknik standar astronomi/fotografi yang terdokumentasi publik.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "100% pemrosesan offline di perangkat — foto Anda tidak pernah dikirim, " +
+                            "diunggah, atau dikumpulkan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                AboutSection("Pengembang") {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                try {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/soe1hom-arch/StackScan")),
+                                    )
+                                } catch (t: Throwable) {
+                                    // Browser tidak tersedia — abaikan.
+                                }
+                            },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    ) {
+                        Row(
+                            Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFF1E2A52), Color(0xFF0C1122)),
+                                        ),
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    painterResource(R.drawable.ic_star_sharp),
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.starAccent,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "soe1hom-arch",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    "Kode sumber terbuka — laporan masalah & saran diterima.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Icon(
+                                painterResource(R.drawable.ic_share),
+                                contentDescription = "Buka GitHub",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                AboutSection("Lisensi") {
+                    Text(
+                        "© 2026 soe1hom-arch. Aplikasi dilisensikan di bawah Apache License 2.0. " +
+                            "StackScan tidak berafiliasi dengan lembaga mana pun.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(
+                        onClick = {
+                            try {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://www.apache.org/licenses/LICENSE-2.0")),
+                                )
+                            } catch (t: Throwable) {
+                                // Browser tidak tersedia — abaikan.
+                            }
+                        },
+                    ) {
+                        Text("Apache License 2.0")
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(
+                        "Lisensi Pihak Ketiga",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        notices ?: "Teks lisensi tidak ditemukan.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         },
     )
+}
+
+@Composable
+private fun AboutHero(versionName: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(Color(0xFF1E2A52), Color(0xFF0A0E1E)),
+                ),
+            )
+            .padding(horizontal = 16.dp, vertical = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(68.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF2E6BFF), Color(0xFF6EC6FF)),
+                        ),
+                    )
+                    .border(1.dp, Color(0x5577D2FF), RoundedCornerShape(18.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_frame_stack),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(38.dp),
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_star_sharp),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.starAccent,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    "StackScan",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.ExtraBold,
+                )
+            }
+            Text(
+                "Stacking foto presisi: makro, serangga & astrofotografi",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AboutChip("v$versionName", MaterialTheme.colorScheme.starAccent)
+                AboutChip("100% offline", MaterialTheme.colorScheme.secondary)
+                AboutChip("Open source", MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutChip(label: String, tint: Color) {
+    Text(
+        label,
+        modifier = Modifier
+            .background(
+                MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                RoundedCornerShape(50),
+            )
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = tint,
+    )
+}
+
+@Composable
+private fun AboutSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(16.dp)
+                    .background(
+                        MaterialTheme.colorScheme.starAccent,
+                        RoundedCornerShape(2.dp),
+                    ),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        content()
+    }
+}
+
+@Composable
+private fun AboutFeatureChips() {
+    val features = listOf(
+        "Preset cerdas" to "Astro, makro & pemandangan",
+        "Stacking streaming" to "Tanpa batas jumlah frame",
+        "RAW/DNG" to "Baca negative RAW kamera",
+        "Koreksi optik" to "Vignette, noise & cahaya",
+        "TIFF 16-bit" to "Export kualitas profesional",
+        "Penyelarasan presisi" to "Deteksi fitur + refine ECC",
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        features.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { (title, desc) ->
+                    Card(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            Text(desc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -937,7 +1156,7 @@ private fun HistoryRow(entry: StackHistoryEntry, onClick: () -> Unit, onRemove: 
             }
             IconButton(onClick = onRemove) {
                 Icon(
-                    Icons.Default.Delete,
+                    painterResource(R.drawable.ic_delete),
                     contentDescription = "Hapus dari riwayat",
                     tint = MaterialTheme.colorScheme.error,
                 )

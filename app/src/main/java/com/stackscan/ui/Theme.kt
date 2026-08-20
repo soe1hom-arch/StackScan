@@ -17,6 +17,7 @@
 package com.stackscan.ui
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -47,6 +48,9 @@ private val StackScanDarkColors = darkColorScheme(
     errorContainer = Color(0xFF5C1515),
     onErrorContainer = Color(0xFFFFDAD6),
 )
+
+val ColorScheme.starAccent: Color
+    get() = Color(0xFF9FD0FF)
 
 @Composable
 fun StackScanTheme(content: @Composable () -> Unit) {

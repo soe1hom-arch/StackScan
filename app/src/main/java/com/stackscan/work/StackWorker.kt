@@ -294,7 +294,7 @@ class StackWorker(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("StackScan — Menggabungkan Foto")
             .setContentText(label)
             .setContentIntent(pi)
@@ -326,7 +326,7 @@ class StackWorker(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(if (success) "StackScan — Selesai" else "StackScan — Gagal")
             .setContentText(text)
             .setContentIntent(pi)

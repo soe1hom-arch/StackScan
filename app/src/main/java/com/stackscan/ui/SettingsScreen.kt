@@ -18,7 +18,6 @@
 
 package com.stackscan.ui
 
-import com.stackscan.processing.OutputColorSpace
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,12 +36,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -71,8 +64,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.stackscan.R
+import com.stackscan.processing.OutputColorSpace
 
 private data class SettingInfo(val title: String, val description: String)
 
@@ -142,7 +138,7 @@ fun SettingsScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Kembali")
+                        Icon(painterResource(R.drawable.ic_back), contentDescription = "Kembali")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -293,7 +289,7 @@ private fun PresetSelectorCard(
                 onClick = { showSaveDialog = true },
                 modifier = Modifier.align(Alignment.Start),
             ) {
-                Icon(Icons.Default.Add, contentDescription = null)
+                Icon(painterResource(R.drawable.ic_add), contentDescription = null)
                 Text("Simpan setelan saat ini sebagai preset kustom")
             }
         }
@@ -382,14 +378,14 @@ private fun CustomPresetRow(
             }
             if (selected) {
                 Icon(
-                    Icons.Default.CheckCircle,
+                    painterResource(R.drawable.ic_check_circle),
                     contentDescription = "Terpilih",
                     tint = MaterialTheme.colorScheme.primary,
                 )
             }
             IconButton(onClick = onDelete) {
                 Icon(
-                    Icons.Default.Delete,
+                    painterResource(R.drawable.ic_delete),
                     contentDescription = "Hapus preset",
                     tint = MaterialTheme.colorScheme.error,
                 )
@@ -444,7 +440,7 @@ private fun PresetOption(
             }
             if (selected) {
                 Icon(
-                    Icons.Default.CheckCircle,
+                    painterResource(R.drawable.ic_check_circle),
                     contentDescription = "Terpilih",
                     tint = MaterialTheme.colorScheme.primary,
                 )
@@ -1011,7 +1007,7 @@ private fun InfoButton(info: SettingInfo?) {
             .height(28.dp),
     ) {
         Icon(
-            Icons.Default.Info,
+            painterResource(R.drawable.ic_info),
             contentDescription = "Info ${info.title}",
             modifier = Modifier.width(16.dp).height(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
