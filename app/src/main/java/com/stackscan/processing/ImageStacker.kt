@@ -205,6 +205,25 @@ object ImageStacker {
                 grays.add(gray)
             }
 
+
+            // Sequator-equivalent: extract sky background from each frame BEFORE
+            // star detection. This removes light pollution gradients that confuse
+            // the star detector and improve alignment accuracy.
+            if (astroMode) {
+                onProgress(0.03f, "Mengekstrak latar langit...")
+                for (fi in frameMats.indices) {
+                    val fiBg = extractSkyBackground(grays[fi])
+                    if (fiBg != null) {
+                        subtractSkyBackgroundFromBgr(frameMats[fi], fiBg)
+                        grays[fi].release()
+                        val newGray = Mat()
+                        Imgproc.cvtColor(frameMats[fi], newGray, Imgproc.COLOR_BGR2GRAY)
+                        grays[fi] = newGray
+                        fiBg.release()
+                    }
+                }
+            }
+
             // Deteksi trail bintang (astro): frame dengan elongasi jauh di atas
             // median set dibuang sebelum align, dan frame acuan dipilih dari sisa
             // set agar bintang yang memanjang tidak menodai transform.
@@ -1335,7 +1354,20 @@ object ImageStacker {
                         "memanjang. Gunakan shutter \u2264 2 dtk / ISO lebih tinggi agar bintang bulat.",
                 )
             }
-            val grayRef = sameSizeAsReference(referenceGray, gray)
+            var grayRef = sameSizeAsReference(referenceGray, gray)
+            // Sequator-equivalent: extract background for faint star detection
+            if (astroMode) {
+                val frameBg = extractSkyBackground(grayRef)
+                if (frameBg != null) {
+                    subtractSkyBackgroundFromBgr(mat, frameBg)
+                    grayRef.release()
+                    val cleanGray = Mat()
+                    Imgproc.cvtColor(mat, cleanGray, Imgproc.COLOR_BGR2GRAY)
+                    grayRef = sameSizeAsReference(referenceGray, cleanGray)
+                    cleanGray.release()
+                    frameBg.release()
+                }
+            }
             val skyWarp = if (astroMode) {
                 starWarp(referenceGray, grayRef)
                     ?: eccWarp(referenceGray, grayRef, Video.MOTION_EUCLIDEAN, eccCriteria, 0.15)
@@ -1855,8 +1887,8 @@ object ImageStacker {
             // Scale σ ke resolusi penuh: noise turun dengan sqrt(pengurangan piksel).
             val scaleFactor = sqrt((w.toDouble() * h.toDouble()) / (128.0 * 128.0))
             val sigmaFull = sigma128 * scaleFactor
-            val kDetect = 8.0
-            val floorPx = 5.0
+            val kDetect = 5.0
+            val floorPx = 3.0
             residSmall.release(); flat.release(); sorted.release(); ad.release(); sortedAd.release()
 
             // 4) Threshold map: bg + max(k*σ, floor).
@@ -2460,21 +2492,7 @@ object ImageStacker {
     }
 
     private fun autoBrightness(floatImage: Mat) {
-        val data = FloatArray(floatImage.cols() * floatImage.rows() * 3)
-        floatImage.get(0, 0, data)
-        var sum = 0.0
-        for (i in data.indices) sum += data[i]
-        val mean = sum / data.size
-        // Hanya mencerahkan bila hasil rata-rata terlalu gelap (langit deep-sky dll).
-        if (mean in 1.0..60.0) {
-            val target = 100.0
-            val exponent = (ln(target / 255.0) / ln(mean / 255.0)).coerceIn(0.45, 1.6)
-            for (i in data.indices) {
-                val v = data[i].coerceIn(0f, 255f) / 255f
-                data[i] = 255f * v.toDouble().pow(exponent).toFloat()
-            }
-            floatImage.put(0, 0, data)
-        }
+        percentileStretch(floatImage)
     }
 
     private fun postProcess(
@@ -2536,6 +2554,14 @@ object ImageStacker {
             onProgress(progressBase + 0.63f * span, "Menyesuaikan kecerahan otomatis...")
             autoBrightness(stacked)
         }
+
+        // Second-pass gradient removal (Sequator-style post-stack cleanup)
+        onProgress(progressBase + 0.64f * span, "Menghapus gradien residual...")
+        removeGradientPostStack(stacked)
+
+        // Background neutralization (Sequator color calibration)
+        onProgress(progressBase + 0.65f * span, "Menetralkan warna latar...")
+        neutralizeBackgroundChannels(stacked)
 
         stacked = convertColorSpace(stacked, colorSpace)
 
@@ -2710,6 +2736,245 @@ object ImageStacker {
             if (maskData != null && maskData[i / 3] <= 0.001f) continue
             val v = data[i].coerceIn(0f, 255f) / 255f
             data[i] = 255f * v.toDouble().pow(exponent).toFloat()
+        }
+        floatImage.put(0, 0, data)
+    }
+
+
+    // =====================================================================
+    // Sequator-equivalent pipeline: polynomial background extraction,
+    // percentile stretch, gradient removal, background neutralization
+    // =====================================================================
+
+    /**
+     * Polynomial sky background extraction (Sequator-equivalent).
+     * Fits a 2D quadratic surface to background pixels via least-squares,
+     * then up-samples the smooth model to full resolution. This removes
+     * light pollution gradients BEFORE star detection, drastically improving
+     * alignment accuracy.
+     */
+    private fun extractSkyBackground(input: Mat, sampleStep: Int = 16): Mat? {
+        return try {
+            val w = input.cols()
+            val h = input.rows()
+            if (w < 32 || h < 32) return null
+
+            val sw = (w / sampleStep).coerceAtLeast(4)
+            val sh = (h / sampleStep).coerceAtLeast(4)
+            val small = Mat()
+            if (input.depth() == CvType.CV_32F) {
+                Imgproc.resize(input, small, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+            } else {
+                val f32 = Mat()
+                input.convertTo(f32, CvType.CV_32F)
+                Imgproc.resize(f32, small, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+                f32.release()
+            }
+
+            val cellW = sw / 4
+            val cellH = sh / 4
+            val xs = ArrayList<Double>()
+            val ys = ArrayList<Double>()
+            val zs = ArrayList<Double>()
+            for (cy in 0 until 4) {
+                for (cx in 0 until 4) {
+                    val x0 = cx * cellW
+                    val y0 = cy * cellH
+                    val x1 = minOf((cx + 1) * cellW, sw)
+                    val y1 = minOf((cy + 1) * cellH, sh)
+                    if (x1 <= x0 || y1 <= y0) continue
+                    val cell = Mat(small, org.opencv.core.Rect(x0, y0, x1 - x0, y1 - y0))
+                    val sorted = Mat()
+                    Core.sort(cell.reshape(1, 1), sorted, Core.SORT_EVERY_ROW or Core.SORT_ASCENDING)
+                    val n = sorted.cols()
+                    val median = if (n > 0) sorted.get(0, n / 2)[0] else 0.0
+                    sorted.release()
+                    xs.add((x0 + x1) / 2.0)
+                    ys.add((y0 + y1) / 2.0)
+                    zs.add(median)
+                }
+            }
+            small.release()
+
+            if (xs.size < 6) return null
+
+            val xNorm = DoubleArray(xs.size) { xs[it] / sw }
+            val yNorm = DoubleArray(xs.size) { ys[it] / sh }
+            val zArr = DoubleArray(xs.size) { zs[it] }
+
+            val nPts = xs.size
+            val nCoeffs = 6
+            val ATA = Array(nCoeffs) { DoubleArray(nCoeffs) }
+            val ATb = DoubleArray(nCoeffs)
+            for (i in 0 until nPts) {
+                val x = xNorm[i]
+                val y = yNorm[i]
+                val basis = doubleArrayOf(1.0, x, y, x * x, x * y, y * y)
+                for (r in 0 until nCoeffs) {
+                    ATb[r] += basis[r] * zArr[i]
+                    for (c in r until nCoeffs) {
+                        ATA[r][c] += basis[r] * basis[c]
+                    }
+                }
+            }
+            for (r in 0 until nCoeffs) {
+                for (c in 0 until r) {
+                    ATA[r][c] = ATA[c][r]
+                }
+            }
+
+            val aug = Array(nCoeffs) { r -> DoubleArray(nCoeffs + 1) { c -> if (c < nCoeffs) ATA[r][c] else ATb[r] } }
+            for (col in 0 until nCoeffs) {
+                var maxRow = col
+                for (row in col + 1 until nCoeffs) {
+                    if (abs(aug[row][col]) > abs(aug[maxRow][col])) maxRow = row
+                }
+                val tmp = aug[col]; aug[col] = aug[maxRow]; aug[maxRow] = tmp
+                val pivot = aug[col][col]
+                if (abs(pivot) < 1e-12) return null
+                for (c in col until nCoeffs + 1) aug[col][c] /= pivot
+                for (row in 0 until nCoeffs) {
+                    if (row == col) continue
+                    val factor = aug[row][col]
+                    for (c in col until nCoeffs + 1) aug[row][c] -= factor * aug[col][c]
+                }
+            }
+            val coeffs = DoubleArray(nCoeffs) { aug[it][nCoeffs] }
+
+            val modelSw = (w / 4).coerceAtLeast(4)
+            val modelSh = (h / 4).coerceAtLeast(4)
+            val modelData = FloatArray(modelSw * modelSh)
+            for (my in 0 until modelSh) {
+                val ny = my.toDouble() / modelSh
+                for (mx in 0 until modelSw) {
+                    val nx = mx.toDouble() / modelSw
+                    modelData[my * modelSw + mx] = (coeffs[0] + coeffs[1] * nx + coeffs[2] * ny +
+                        coeffs[3] * nx * nx + coeffs[4] * nx * ny + coeffs[5] * ny * ny).toFloat()
+                }
+            }
+            val modelMat = Mat(modelSh, modelSw, CvType.CV_32F)
+            modelMat.put(0, 0, modelData)
+
+            val bg = Mat()
+            Imgproc.resize(modelMat, bg, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            modelMat.release()
+            bg
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractSkyBackground gagal: ${t.message}")
+            null
+        }
+    }
+
+    /**
+     * Subtract sky background model from a BGR float image.
+     */
+    private fun subtractSkyBackgroundFromBgr(mat: Mat, bg: Mat) {
+        val bg3 = Mat()
+        Imgproc.cvtColor(bg, bg3, Imgproc.COLOR_GRAY2BGR)
+        Core.subtract(mat, bg3, mat)
+        Core.max(mat, Scalar.all(0.0), mat)
+        Core.min(mat, Scalar.all(255.0), mat)
+        bg3.release()
+    }
+
+    /**
+     * Percentile-based asymmetric histogram stretch (Sequator-equivalent).
+     * Maps [lowPct, highPct] percentiles to [0, 255] with sigmoid midtone boost.
+     */
+    private fun percentileStretch(floatImage: Mat, lowPct: Double = 0.5, highPct: Double = 99.5) {
+        val width = floatImage.cols()
+        val height = floatImage.rows()
+        val totalPixels = width * height
+        val data = FloatArray(totalPixels * 3)
+        floatImage.get(0, 0, data)
+
+        val lumHist = IntArray(256)
+        var i = 0
+        while (i < data.size) {
+            val r = data[i + 2].coerceIn(0f, 255f)
+            val g = data[i + 1].coerceIn(0f, 255f)
+            val b = data[i].coerceIn(0f, 255f)
+            val lum = (0.299f * r + 0.587f * g + 0.114f * b).roundToInt().coerceIn(0, 255)
+            lumHist[lum]++
+            i += 3
+        }
+
+        val lowCount = (totalPixels * lowPct / 100.0).toInt()
+        val highCount = (totalPixels * highPct / 100.0).toInt()
+        var cumSum = 0
+        var blackPoint = 0
+        var whitePoint = 255
+        for (v in 0..255) {
+            cumSum += lumHist[v]
+            if (cumSum >= lowCount && blackPoint == 0) blackPoint = v
+            if (cumSum >= highCount && whitePoint == 255) whitePoint = v
+        }
+        if (whitePoint <= blackPoint) whitePoint = blackPoint + 1
+
+        Log.i(TAG, "Percentile stretch: black=$blackPoint, white=$whitePoint (${lowPct}%-${highPct}%)")
+
+        val range = (whitePoint - blackPoint).toDouble()
+        i = 0
+        while (i < data.size) {
+            for (c in 0..2) {
+                val v = data[i + c].coerceIn(0f, 255f)
+                var stretched = ((v - blackPoint) / range * 255.0).coerceIn(0.0, 255.0)
+                val norm = stretched / 255.0
+                val boosted = 255.0 / (1.0 + Math.exp(-8.0 * (norm - 0.5)))
+                data[i + c] = (0.8 * stretched + 0.2 * boosted).toFloat()
+            }
+            i += 3
+        }
+        floatImage.put(0, 0, data)
+    }
+
+    /**
+     * Second-pass polynomial gradient removal on stacked image.
+     */
+    private fun removeGradientPostStack(floatImage: Mat) {
+        val width = floatImage.cols()
+        val height = floatImage.rows()
+        val lum = Mat()
+        Imgproc.cvtColor(floatImage, lum, Imgproc.COLOR_BGR2GRAY)
+        val bg = extractSkyBackground(lum, sampleStep = 8)
+        lum.release()
+        if (bg != null) {
+            subtractSkyBackgroundFromBgr(floatImage, bg)
+            bg.release()
+        }
+    }
+
+    /**
+     * Background neutralization: subtract per-channel background offset
+     * so the average background is neutral gray (prevents color cast).
+     */
+    private fun neutralizeBackgroundChannels(floatImage: Mat) {
+        val width = floatImage.cols()
+        val height = floatImage.rows()
+        val totalPixels = width * height
+        val data = FloatArray(totalPixels * 3)
+        floatImage.get(0, 0, data)
+
+        val channelSorted = Array(3) { IntArray(totalPixels) }
+        for (c in 0..2) {
+            for (p in 0 until totalPixels) {
+                channelSorted[c][p] = data[p * 3 + c].roundToInt().coerceIn(0, 255)
+            }
+            channelSorted[c].sort()
+        }
+        val bgIdx = (totalPixels * 0.02).toInt().coerceIn(0, totalPixels - 1)
+        val bgB = channelSorted[0][bgIdx].toDouble()
+        val bgG = channelSorted[1][bgIdx].toDouble()
+        val bgR = channelSorted[2][bgIdx].toDouble()
+        val bgAvg = (bgB + bgG + bgR) / 3.0
+
+        val offsets = doubleArrayOf(bgB - bgAvg, bgG - bgAvg, bgR - bgAvg)
+        var i = 0
+        while (i < data.size) {
+            for (c in 0..2) {
+                data[i + c] = (data[i + c] - offsets[c].toFloat()).coerceIn(0f, 255f)
+            }
+            i += 3
         }
         floatImage.put(0, 0, data)
     }
