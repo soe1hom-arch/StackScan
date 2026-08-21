@@ -50,8 +50,8 @@ android {
         applicationId = "com.stackscan"
         minSdk = 24
         targetSdk = 34
-        versionCode = 18
-        versionName = "9.0"
+        versionCode = 19
+        versionName = "9.1"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }

@@ -1,12 +1,17 @@
 # StackScan
 
-Aplikasi Android untuk **stacking foto multi-frame**: ambil atau pilih beberapa foto dari scene yang sama, lalu StackScan menyelaraskan (align) dan menggabungkannya (stack) menjadi satu gambar yang lebih bersih, lebih tajam, dan lebih kaya detail — semua diproses **100% offline di perangkat**. Versi APK saat ini: **9.0** (versionCode 18).
+Aplikasi Android untuk **stacking foto multi-frame**: ambil atau pilih beberapa foto dari scene yang sama, lalu StackScan menyelaraskan (align) dan menggabungkannya (stack) menjadi satu gambar yang lebih bersih, lebih tajam, dan lebih kaya detail — semua diproses **100% offline di perangkat**. Versi APK saat ini: **9.1** (versionCode 19).
 
 ## Fitur
 
-**Stacking**
+**Stacking — Pipeline Kualitas Sequator**
+- **Background extraction per-frame** (polynomial surface fitting) — menghilangkan gradien polusi cahaya **sebelum** deteksi bintang, sehingga alignment jauh lebih presisi.
+- **Detektor bintang sensitif** (threshold 5σ) — menemukan bintang redup yang sebelumnya tidak terdeteksi.
+- **Percentile histogram stretch** (asimetris + sigmoid midtone boost) — mengganti auto-brightness sederhana; menghasilkan kontras langit yang lebih dramatis seperti Sequator.
+- **Gradient removal pasca-stack** — polynomial fitting kedua setelah stacking untuk menghilangkan gradien residual.
+- **Background neutralization** — netralisasi warna latar per-channel mencegah color cast.
 - 5 algoritma: **Real (kappa-sigma)**, **Lighten**, **Median**, **Trails** (star trails), dan **Align only**.
-- Alignment sub-pixel (OpenCV ECC) + **alignment berbasis bintang toleran rotasi** (pencocokan rasio jarak + deteksi bintang adaptif) untuk foto astro, dengan fallback ECC.
+- Alignment sub-pixel (OpenCV ECC) + **alignment berbasis bintang toleran rotasi** (pencocokan rasio Lowe + RANSAC affine) untuk foto astro, dengan fallback ECC.
 - **Mode Pro streaming** untuk 17+ frame, file RAW/DNG, dan kualitas Full (tanpa batas jumlah, memori konstan).
 - Kualitas kerja: **Cepat**, **HD**, dan **Full/Asli** (hingga 4096px, menyesuaikan memori perangkat).
 - **Dark frames** & **flat frames** opsional — dikoreksi **sebelum** penyelarasan di semua jalur; dark master mempertahankan hot pixel agar pengurangannya tepat.
@@ -16,7 +21,7 @@ Aplikasi Android untuk **stacking foto multi-frame**: ambil atau pilih beberapa 
 **Output & pengaturan**
 - Simpan **JPG** + **TIFF 16-bit** (multi-strip, profil ICC sesuai ruang warna, resolusi 300 DPI), kecerahan otomatis, merge piksel 2×2, komposisi **HDR** berbasis luminance, ketajaman.
 - **Keseimbangan warna** (slider tint 2700–10000 K) dan **ruang warna** (sRGB / Adobe RGB / Display P3) — TIFF menyertakan profil ICC yang sesuai.
-- Preset **Umum, Astro, Gelap (Deep-sky), Sequator**, **Manual**, dan preset kustom; semua setelan tersimpan otomatis antar sesi.
+- Preset **Umum** (makro), **Astro** (bintang, kappa-sigma + auto brightness), **Gelap (Deep-sky)** (objek samar, LPR agresif), **Sequator** (lighten/ensemble, auto brightness, tanpa koreksi tambahan), **Manual**, dan preset kustom; semua setelan tersimpan otomatis antar sesi.
 - **Riwayat hasil**: 50 hasil terakhir dengan thumbnail, statistik, dan akses cepat.
 - Stacking berjalan di latar belakang (WorkManager) dengan notifikasi progres — boleh keluar aplikasi atau mematikan layar.
 
@@ -108,6 +113,15 @@ lengkap: [`PRIVACY.md`](PRIVACY.md).
 
 ## Riwayat perubahan
 
+**9.1 (versionCode 19)** — pipeline kualitas Sequator:
+- **Background extraction per-frame** (polynomial surface fitting quadratic) menghilangkan gradien polusi cahaya sebelum deteksi bintang — alignment presisi naik drastis.
+- **Detektor bintang threshold diturunkan** dari 8σ ke 5σ, floor 3px — bintang redup yang sebelumnya tidak terdeteksi sekarang ditemukan.
+- **Percentile histogram stretch** (asimetris 0.5%–99.5% + sigmoid midtone boost) mengganti autoBrightness lama — kontras langit mendekati Sequator.
+- **Gradient removal pasca-stack** — polynomial fitting kedua setelah stacking untuk menghilangkan gradien residual.
+- **Background neutralization** — netralisasi warna latar per-channel mencegah color cast dari polusi cahaya.
+- Pipeline stacking diperbarui: background extraction → star detection → alignment → stacking → percentile stretch → gradient removal → neutralization → color space.
+- Preset disesuaikan: ASTRO nyalakan vignette/LPR/auto brightness, DEEP_SKY tambah LPR agresif + sky brightness, SEQUATOR pakai lighten + auto brightness.
+
 **9.0 (versionCode 18)** — pembaruan besar engine & tata kelola proyek:
 - RAW/DNG dibaca **16-bit asli** (sebelumnya terpotong ke 8-bit) dengan orientasi EXIF diterapkan.
 - Kalibrasi dark/flat diterapkan **sebelum warp** di semua jalur; dark master mempertahankan hot pixel.
@@ -121,6 +135,7 @@ lengkap: [`PRIVACY.md`](PRIVACY.md).
 ## Keterbatasan
 
 - Butuh minimal 2 foto dari scene yang sama; stacking tidak bisa memunculkan detail yang tidak pernah terekam.
+- **Kamera bawaan (night mode)** sering melakukan stacking internal sebelum foto tersimpan, sehingga bintang sudah bergeser/ghosting. Hasil StackScan akan lebih baik dengan foto RAW atau foto tanpa night mode bawaan.
 - Proses RAW resolusi sangat besar (48MP+) lebih lambat; gunakan kualitas **Cepat/HD** untuk itu.
 - Kualitas **Full/Asli** menyesuaikan kapasitas memori perangkat (resolusi diturunkan otomatis pada perangkat dengan RAM kecil).
 - Sampai 16 frame diproses sekaligus (kappa-sigma iteratif penuh / Median); 17+ frame memakai Mode Pro streaming (lebih hemat memori, sedikit lebih lama).

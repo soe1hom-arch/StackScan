@@ -38,7 +38,7 @@ lengkap ikut ter-distribusi di dalam APK (`assets/licenses/`) dan di repositori 
 - AAR Maven tidak menyertakan file lisensi, maka atribusi disertakan di sini dan di `assets/licenses/THIRD_PARTY_NOTICES.txt`.
 
 ### Konsep stacking astronomi
-- Algoritma yang dipakai (image alignment, kappa-sigma clipping, light pollution reduction, vignette correction) adalah metode standar astronomi/fotografi yang terdokumentasi luas di ranah publik. StackScan tidak berafiliasi dengan lembaga/instansi mana pun.
+- Algoritma yang dipakai (image alignment, kappa-sigma clipping, light pollution reduction, vignette correction, polynomial background extraction, percentile histogram stretch) adalah metode standar astronomi/fotografi yang terdokumentasi luas di ranah publik. StackScan tidak berafiliasi dengan Sequator atau lembaga/instansi mana pun.
 
 ## Teks lisensi lengkap (di dalam APK & repo)
 - [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — `app/src/main/assets/licenses/Apache-2.0.txt`
