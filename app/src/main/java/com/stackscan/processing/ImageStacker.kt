@@ -1862,12 +1862,10 @@ object ImageStacker {
         val classification: StarType = StarType.STAR_POINT,
     )
 
-    private companion object StarClassify {
-        private const val ELONGATION_STAR_THRESHOLD = 1.8
-        private const val ELONGATION_TRAIL_THRESHOLD = 3.5
-        private const val MIN_AREA_FOR_STAR = 3.0
-        private const val MAX_AREA_FOR_NOISE = 2.0
-    }
+    private const val ELONGATION_STAR_THRESHOLD = 1.8
+    private const val ELONGATION_TRAIL_THRESHOLD = 3.5
+    private const val MIN_AREA_FOR_STAR = 3.0
+    private const val MAX_AREA_FOR_NOISE = 2.0
 
     private fun classifyStar(elongation: Double, area: Double, peakIntensity: Double): StarType {
         if (area < MIN_AREA_FOR_STAR || peakIntensity < 5.0) return StarType.NOISE
