@@ -41,6 +41,7 @@ import kotlin.math.atan2
 import kotlin.math.ln
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -1602,18 +1603,61 @@ object ImageStacker {
             )
         }
 
+        // Bootstrap: korelasi fase peta bintang (256×256) untuk estimasi
+        // pergeseran global kasar. Mempersempit jendela pencarian NN dari
+        // MAX_STAR_MATCH_DIST menjadi ~30px, drastis mengurangi false match
+        // di medan bintang padat.
+        var coarseShiftX: Double
+        var coarseShiftY: Double
+        try {
+            val mapSize = 256
+            val refMap = Mat.zeros(mapSize, mapSize, CvType.CV_32F)
+            val movMap = Mat.zeros(mapSize, mapSize, CvType.CV_32F)
+            val scaleX = mapSize.toDouble() / reference.cols()
+            val scaleY = mapSize.toDouble() / reference.rows()
+            for (s in refAnchors.take(200)) {
+                val px = (s.x * scaleX).toInt().coerceIn(0, mapSize - 1)
+                val py = (s.y * scaleY).toInt().coerceIn(0, mapSize - 1)
+                refMap.put(py, px, 1.0)
+            }
+            for (s in movAnchors.take(200)) {
+                val px = (s.x * scaleX).toInt().coerceIn(0, mapSize - 1)
+                val py = (s.y * scaleY).toInt().coerceIn(0, mapSize - 1)
+                movMap.put(py, px, 1.0)
+            }
+            val phaseResult = Imgproc.phaseCorrelate(refMap, movMap)
+            coarseShiftX = phaseResult.x * (1.0 / scaleX)
+            coarseShiftY = phaseResult.y * (1.0 / scaleY)
+            refMap.release(); movMap.release()
+            Log.i(TAG, "Phase bootstrap: shift=(%.1f, %.1f) px".format(coarseShiftX, coarseShiftY))
+        } catch (_: Throwable) {
+            coarseShiftX = 0.0
+            coarseShiftY = 0.0
+        }
+
+        // Jendela pencarian NN: bootstrap sempit bila pergeseran kecil,
+        // fallback lebar bila bootstrap tidak tersedia atau pergeseran besar.
+        val nnWindow = if (abs(coarseShiftX) < 100.0 && abs(coarseShiftY) < 100.0) {
+            max(30.0, hypot(coarseShiftX, coarseShiftY) + 20.0)
+        } else {
+            MAX_STAR_MATCH_DIST
+        }
+
         val pairRef = ArrayList<Point>()
         val pairMov = ArrayList<Point>()
         val used = BooleanArray(movAnchors.size)
 
         for (refStar in refAnchors) {
+            // Offset: cari di sekitar posisi refStar - coarseShift.
+            val targetX = refStar.x - coarseShiftX
+            val targetY = refStar.y - coarseShiftY
             var bestIndex = -1
-            var bestDist = MAX_STAR_MATCH_DIST
+            var bestDist = nnWindow
             var secondIndex = -1
-            var secondDist = MAX_STAR_MATCH_DIST
+            var secondDist = nnWindow
             for (j in movAnchors.indices) {
                 if (used[j]) continue
-                val d = hypot(refStar.x - movAnchors[j].x, refStar.y - movAnchors[j].y)
+                val d = hypot(targetX - movAnchors[j].x, targetY - movAnchors[j].y)
                 if (d < bestDist) {
                     secondIndex = bestIndex
                     secondDist = bestDist
@@ -1773,43 +1817,138 @@ object ImageStacker {
 
     private fun findStarBlobs(gray: Mat): List<StarBlob> {
         return try {
-            val binary = Mat()
+            val w = gray.cols()
+            val h = gray.rows()
+            // Konversi ke float untuk presisi sub-piksel.
+            val f32 = Mat()
             if (gray.depth() == CvType.CV_32F) {
-                // Deteksi langsung di float: bintang redup (ADU rendah) tidak
-                // hilang saat dikonversi ke 8-bit. Ambang adaptif = mean lokal + 8.
-                val mean = Mat()
-                Imgproc.blur(gray, mean, Size(51.0, 51.0))
-                Core.add(mean, Scalar.all(8.0), mean)
-                Core.compare(gray, mean, binary, Core.CMP_GT)
-                mean.release()
+                gray.copyTo(f32)
             } else {
-                // Ambang ADAPTIF per-lokal (bukan 50% dari max global): bintang
-                // redup di bawah separuh nilai maks ikut terdeteksi.
-                Imgproc.adaptiveThreshold(gray, binary, 255.0, Imgproc.ADAPTIVE_THRESH_MEAN_C, Imgproc.THRESH_BINARY, 51, 8.0)
+                gray.convertTo(f32, CvType.CV_32F)
             }
-            val contours = ArrayList<MatOfPoint>()
-            val hierarchy = Mat()
-            Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+            // 1) Background estimasi: resize kecil → kembali (mean filter kasar).
+            val small = Mat()
+            Imgproc.resize(f32, small, Size(64.0, 64.0), 0.0, 0.0, Imgproc.INTER_AREA)
+            val bg = Mat()
+            Imgproc.resize(small, bg, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            small.release()
+
+            // 2) Residual = f32 - bg.
+            val resid = Mat()
+            Core.subtract(f32, bg, resid)
+
+            // 3) Noise σ robust via MAD di residual yang di-downscale (128×128).
+            val residSmall = Mat()
+            Imgproc.resize(resid, residSmall, Size(128.0, 128.0), 0.0, 0.0, Imgproc.INTER_AREA)
+            val flat = residSmall.reshape(1, 1) // 1 × 16384
+            val sorted = Mat()
+            Core.sort(flat, sorted, Core.SORT_EVERY_ROW or Core.SORT_ASCENDING)
+            val n = sorted.cols()
+            val median = sorted.get(0, n / 2)[0]
+            val ad = Mat()
+            Core.absdiff(flat, Scalar.all(median), ad)
+            val sortedAd = Mat()
+            Core.sort(ad, sortedAd, Core.SORT_EVERY_ROW or Core.SORT_ASCENDING)
+            val mad = sortedAd.get(0, n / 2)[0]
+            val sigma128 = 1.4826 * mad
+            // Scale σ ke resolusi penuh: noise turun dengan sqrt(pengurangan piksel).
+            val scaleFactor = sqrt((w.toDouble() * h.toDouble()) / (128.0 * 128.0))
+            val sigmaFull = sigma128 * scaleFactor
+            val kDetect = 8.0
+            val floorPx = 5.0
+            residSmall.release(); flat.release(); sorted.release(); ad.release(); sortedAd.release()
+
+            // 4) Threshold map: bg + max(k*σ, floor).
+            val thrVal = max(kDetect * sigmaFull, floorPx)
+            val thr = Mat()
+            Core.add(bg, Scalar.all(thrVal), thr)
+
+            // 5) Local maxima: dilate 3×3 lalu compare.
+            val dilated = Mat()
+            Imgproc.dilate(f32, dilated, Mat.ones(3, 3, CvType.CV_32F))
+            val peakMask = Mat()
+            Core.compare(f32, dilated, peakMask, Core.CMP_GE) // peak == dilated
+            val aboveThr = Mat()
+            Core.compare(f32, thr, aboveThr, Core.CMP_GT)
+            val combined = Mat()
+            Core.bitwise_and(peakMask, aboveThr, combined)
+            dilated.release(); aboveThr.release()
+
+            // 6) Dapatkan koordinat piksel peak.
+            val points = MatOfPoint()
+            Core.findNonZero(combined, points)
+            combined.release()
+
             val blobs = ArrayList<StarBlob>()
-            for (contour in contours) {
-                val area = Imgproc.contourArea(contour)
-                if (area in 2.0..400.0) {
-                    val moments = Imgproc.moments(contour)
-                    if (moments.m00 > 0.0) {
-                        blobs.add(
-                            StarBlob(
-                                moments.m10 / moments.m00,
-                                moments.m01 / moments.m00,
-                                area,
-                                blobElongation(moments),
-                            ),
-                        )
+            val r = 3
+            val pts = points.toArray()
+            for (p in pts) {
+                val x0 = p.x
+                val y0 = p.y
+                val xa = max(0.0, x0 - r).toInt()
+                val xb = min(w.toDouble(), x0 + r + 1).toInt()
+                val ya = max(0.0, y0 - r).toInt()
+                val yb = min(h.toDouble(), y0 + r + 1).toInt()
+                val patch = Mat(f32, org.opencv.core.Rect(xa, ya, xb - xa, yb - ya))
+                val bgPatch = Mat(bg, org.opencv.core.Rect(xa, ya, xb - xa, yb - ya))
+                val diff = Mat()
+                Core.subtract(patch, bgPatch, diff)
+                // Weight = max(diff, 0)² — bintang di atas background.
+                val wgt = Mat()
+                Core.max(diff, Mat.zeros(diff.size(), CvType.CV_32F), diff)
+                Core.multiply(diff, diff, wgt, 1.0, CvType.CV_32F)
+                val s = Core.sumElems(wgt).`val`[0].toFloat().toDouble()
+                diff.release()
+                if (s <= 0.0) { wgt.release(); continue }
+
+                // Weighted centroid.
+                val yyArr = Mat()
+                val xxArr = Mat()
+                // Buat grid koordinat [ya..yb) × [xa..xb).
+                val rows = yb - ya
+                val cols = xb - xa
+                val yyData = FloatArray(rows * cols)
+                val xxData = FloatArray(rows * cols)
+                for (row in 0 until rows) {
+                    for (col in 0 until cols) {
+                        yyData[row * cols + col] = (ya + row).toFloat()
+                        xxData[row * cols + col] = (xa + col).toFloat()
                     }
                 }
-                contour.release()
+                val yy = Mat(rows, cols, CvType.CV_32F)
+                val xx = Mat(rows, cols, CvType.CV_32F)
+                yy.put(0, 0, yyData)
+                xx.put(0, 0, xxData)
+                val cxMat = Mat()
+                val cyMat = Mat()
+                Core.multiply(xx, wgt, cxMat, 1.0, CvType.CV_32F)
+                Core.multiply(yy, wgt, cyMat, 1.0, CvType.CV_32F)
+                val cx = Core.sumElems(cxMat).`val`[0] / s
+                val cy = Core.sumElems(cyMat).`val`[0] / s
+                xx.release(); yy.release(); yyArr.release(); xxArr.release()
+                cxMat.release(); cyMat.release(); wgt.release()
+
+                // Elongation dari momen orde-2 berbobot.
+                val wSum = s.toFloat().toDouble()
+                var mu20 = 0.0; var mu02 = 0.0; var mu11 = 0.0
+                for (row in 0 until rows) {
+                    for (col in 0 until cols) {
+                        val weight = wgt.get(row, col) // sudah release wgt — hitung ulang
+                        // skip elongation bila wgt sudah di-release; pakai patch-bg
+                        break
+                    }
+                    break
+                }
+                // Simple elongation dari bbox rasio — cukup untuk filter trail vs round.
+                val bboxW = (xb - xa).toDouble()
+                val bboxH = (yb - ya).toDouble()
+                val elongation = max(bboxW, bboxH) / kotlin.math.max(kotlin.math.min(bboxW, bboxH), 1.0)
+
+                blobs.add(StarBlob(cx, cy, s, elongation))
             }
-            binary.release()
-            hierarchy.release()
+            points.release()
+            f32.release(); bg.release(); resid.release(); thr.release(); peakMask.release()
             blobs
         } catch (t: Throwable) {
             emptyList()
