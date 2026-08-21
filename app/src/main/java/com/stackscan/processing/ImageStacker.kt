@@ -1960,7 +1960,7 @@ object ImageStacker {
                 val s = Core.sumElems(wgt).`val`[0].toFloat().toDouble()
                 if (s <= 0.0) { diff.release(); wgt.release(); continue }
                 // Compute peak and mean BEFORE releasing diff
-                val peakVal = diff.max().`val`[0]
+                val peakVal = Core.minMaxLoc(diff).maxVal
                 val sumDiff = Core.sumElems(diff).`val`[0]
                 diff.release()
 
@@ -2976,7 +2976,7 @@ object ImageStacker {
             val gray = Mat()
             Imgproc.cvtColor(mat, gray, Imgproc.COLOR_BGR2GRAY)
             val starMask = Mat()
-            Core.threshold(gray, starMask, 60.0, 255.0, Imgproc.THRESH_BINARY)
+            Imgproc.threshold(gray, starMask, 60.0, 255.0, Imgproc.THRESH_BINARY)
             gray.release()
             // Dilate star mask to protect halo
             val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
