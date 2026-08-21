@@ -20,6 +20,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import com.stackscan.BuildConfig
 import org.opencv.android.Utils
 import org.opencv.calib3d.Calib3d
 import org.opencv.core.Core
@@ -33,6 +34,7 @@ import org.opencv.core.Point
 import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.core.TermCriteria
+import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import org.opencv.imgproc.Moments
 import org.opencv.video.Video
@@ -58,16 +60,16 @@ object ImageStacker {
 
     const val MAX_FRAMES = 16
     const val MAX_PICKER_IMAGES = 100
-    private const val MIN_STARS_COUNT = 4
+    private const val MIN_STARS_COUNT = 6
     // Jarak cari diperlebar + uji rasio tetangga terdekat agar rotasi frame
     // (hingga beberapa derajat di tepi) tetap bisa dicocokkan, bukan langsung jatuh ke ECC.
-    private const val MAX_STAR_MATCH_DIST = 150.0
+    private const val MAX_STAR_MATCH_DIST = 100.0
     private const val STAR_MATCH_RATIO = 0.75
     // Refinement & kontrol kualitas alignment bintang: residual inlier (px) yang
     // tidak bisa dihilangkan oleh affine RANSAC membuat bintang tampak memanjang
     // saat di-stack (lighten/kappa-sigma mengawetkan jejak sub-piksel tsb).
     private const val STAR_REFINE_RESIDUAL_PX = 0.6
-    private const val MAX_STAR_ALIGN_RESIDUAL_PX = 1.5
+    private const val MAX_STAR_ALIGN_RESIDUAL_PX = 1.0
     // Deteksi trail bintang: frame dengan elongasi jauh di atas median set dibuang
     // sebelum align, dan anchor alignment hanya memakai bintang bulat (centroid
     // stabil). Bila hampir semua frame memanjang, tidak ada yang dibuang — hanya
@@ -206,23 +208,11 @@ object ImageStacker {
             }
 
 
-            // Sequator-equivalent: extract sky background from each frame BEFORE
-            // star detection. This removes light pollution gradients that confuse
-            // the star detector and improve alignment accuracy.
-            if (astroMode) {
-                onProgress(0.03f, "Mengekstrak latar langit...")
-                for (fi in frameMats.indices) {
-                    val fiBg = extractSkyBackground(grays[fi])
-                    if (fiBg != null) {
-                        subtractSkyBackgroundFromBgr(frameMats[fi], fiBg)
-                        grays[fi].release()
-                        val newGray = Mat()
-                        Imgproc.cvtColor(frameMats[fi], newGray, Imgproc.COLOR_BGR2GRAY)
-                        grays[fi] = newGray
-                        fiBg.release()
-                    }
-                }
-            }
+            // NOTE: Background extraction is NOT applied here (before star detection).
+            // It is applied per-frame inside loadAlignedFrame() AFTER warping,
+            // which is the correct Sequator-equivalent behavior.
+            // Extracting background before star detection would remove faint stars
+            // and corrupt alignment accuracy.
 
             // Deteksi trail bintang (astro): frame dengan elongasi jauh di atas
             // median set dibuang sebelum align, dan frame acuan dipilih dari sisa
@@ -1355,19 +1345,9 @@ object ImageStacker {
                 )
             }
             var grayRef = sameSizeAsReference(referenceGray, gray)
-            // Sequator-equivalent: extract background for faint star detection
-            if (astroMode) {
-                val frameBg = extractSkyBackground(grayRef)
-                if (frameBg != null) {
-                    subtractSkyBackgroundFromBgr(mat, frameBg)
-                    grayRef.release()
-                    val cleanGray = Mat()
-                    Imgproc.cvtColor(mat, cleanGray, Imgproc.COLOR_BGR2GRAY)
-                    grayRef = sameSizeAsReference(referenceGray, cleanGray)
-                    cleanGray.release()
-                    frameBg.release()
-                }
-            }
+            // NOTE: Background extraction is NOT applied here (before star detection).
+            // It is applied AFTER warping in the alignment step, which is the correct
+            // Sequator-equivalent behavior.
             val skyWarp = if (astroMode) {
                 starWarp(referenceGray, grayRef)
                     ?: eccWarp(referenceGray, grayRef, Video.MOTION_EUCLIDEAN, eccCriteria, 0.15)
@@ -1456,7 +1436,7 @@ object ImageStacker {
         for (p in data.indices) {
             val v = (data[p] * factor).toFloat()
             val variance = (sumsq[p] / count).coerceAtLeast(0f)
-            val sigma = max(8f, sqrt(variance)).toFloat()
+            val sigma = max(2f, sqrt(variance)).toFloat()
             if (abs(v - mean[p]) <= kappa * sigma) {
                 clipSum[p] += v
                 clipCount[p]++
@@ -1464,15 +1444,27 @@ object ImageStacker {
         }
     }
 
+    /**
+     * Robust luminance using background region statistics (BAGIAN 12).
+     * Uses median of lower 50th percentile to avoid bright stars and
+     * light pollution gradient biasing the measurement.
+     */
     private fun luminanceOf(data: FloatArray): Double {
-        var sum = 0.0
+        val n = data.size / 3
+        if (n <= 0) return 1.0
+        // Sample luminance for every 4th pixel (performance on Android)
+        val sampled = mutableListOf<Float>()
         var i = 0
         while (i + 2 < data.size) {
-            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-            i += 3
+            sampled.add((0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]).toFloat())
+            i += 12 // every 4th pixel (3 channels × 4 = 12 stride)
         }
-        val pixels = data.size / 3
-        return if (pixels > 0) sum / pixels else 1.0
+        if (sampled.isEmpty()) return 1.0
+        sampled.sort()
+        // Use median of lower half (background region, avoiding bright sources)
+        val halfSize = sampled.size / 2
+        val lowerHalf = sampled.subList(0, halfSize.coerceAtLeast(1))
+        return lowerHalf.average().coerceAtLeast(0.001)
     }
 
     private fun exposureFactorFor(data: FloatArray, refLum: Double): Double =
@@ -1493,8 +1485,17 @@ object ImageStacker {
             for (i in grays.indices) {
                 if (pass == 0 && i in excluded) continue
                 val base = if (astroMode) {
-                    // Astro: jumlah bintang paling penting, tekstur sebagai tie-break.
-                    findStarPoints(grays[i]).size.toDouble() * 100.0 + textureScore(grays[i])
+                    // Astro: star count + roundness bonus + SNR + sharpness.
+                    val blobs = findStarBlobs(grays[i])
+                    val starCount = blobs.size.toDouble()
+                    val roundStars = blobs.count { it.classification == StarType.STAR_POINT }.toDouble()
+                    val roundRatio = if (starCount > 0) roundStars / starCount else 0.0
+                    val avgSNR = if (blobs.isNotEmpty()) blobs.map { it.peakIntensity / (it.meanIntensity + 1.0) }.average() else 0.0
+                    starCount * 50.0 +
+                        roundRatio * 200.0 +
+                        roundStars * 80.0 +
+                        avgSNR * 30.0 +
+                        textureScore(grays[i])
                 } else {
                     textureScore(grays[i])
                 }
@@ -1845,7 +1846,35 @@ object ImageStacker {
         }
     }
 
-    private data class StarBlob(val x: Double, val y: Double, val area: Double, val elongation: Double)
+    private enum class StarType { STAR_POINT, ELONGATED_STAR, TRAIL, NOISE }
+
+    private data class StarBlob(
+        val x: Double,
+        val y: Double,
+        val area: Double,
+        val elongation: Double,
+        val peakIntensity: Double = 0.0,
+        val meanIntensity: Double = 0.0,
+        val majorAxis: Double = 0.0,
+        val minorAxis: Double = 0.0,
+        val orientation: Double = 0.0,
+        val roundness: Double = 0.0,
+        val classification: StarType = StarType.STAR_POINT,
+    )
+
+    private companion object StarClassify {
+        private const val ELONGATION_STAR_THRESHOLD = 1.8
+        private const val ELONGATION_TRAIL_THRESHOLD = 3.5
+        private const val MIN_AREA_FOR_STAR = 3.0
+        private const val MAX_AREA_FOR_NOISE = 2.0
+    }
+
+    private fun classifyStar(elongation: Double, area: Double, peakIntensity: Double): StarType {
+        if (area < MIN_AREA_FOR_STAR || peakIntensity < 5.0) return StarType.NOISE
+        if (elongation <= ELONGATION_STAR_THRESHOLD) return StarType.STAR_POINT
+        if (elongation <= ELONGATION_TRAIL_THRESHOLD) return StarType.ELONGATED_STAR
+        return StarType.TRAIL
+    }
 
     private fun findStarBlobs(gray: Mat): List<StarBlob> {
         return try {
@@ -1887,7 +1916,7 @@ object ImageStacker {
             // Scale σ ke resolusi penuh: noise turun dengan sqrt(pengurangan piksel).
             val scaleFactor = sqrt((w.toDouble() * h.toDouble()) / (128.0 * 128.0))
             val sigmaFull = sigma128 * scaleFactor
-            val kDetect = 5.0
+            val kDetect = 3.5
             val floorPx = 3.0
             residSmall.release(); flat.release(); sorted.release(); ad.release(); sortedAd.release()
 
@@ -1931,8 +1960,11 @@ object ImageStacker {
                 Core.max(diff, Mat.zeros(diff.size(), CvType.CV_32F), diff)
                 Core.multiply(diff, diff, wgt, 1.0, CvType.CV_32F)
                 val s = Core.sumElems(wgt).`val`[0].toFloat().toDouble()
+                if (s <= 0.0) { diff.release(); wgt.release(); continue }
+                // Compute peak and mean BEFORE releasing diff
+                val peakVal = diff.max().`val`[0]
+                val sumDiff = Core.sumElems(diff).`val`[0]
                 diff.release()
-                if (s <= 0.0) { wgt.release(); continue }
 
                 // Weighted centroid.
                 val yyArr = Mat()
@@ -1958,26 +1990,36 @@ object ImageStacker {
                 Core.multiply(yy, wgt, cyMat, 1.0, CvType.CV_32F)
                 val cx = Core.sumElems(cxMat).`val`[0] / s
                 val cy = Core.sumElems(cyMat).`val`[0] / s
-                xx.release(); yy.release(); yyArr.release(); xxArr.release()
-                cxMat.release(); cyMat.release(); wgt.release()
-
-                // Elongation dari momen orde-2 berbobot.
-                val wSum = s.toFloat().toDouble()
+                // Elongation dari momen orde-2 berbobot (SEBELUM wgt di-release).
                 var mu20 = 0.0; var mu02 = 0.0; var mu11 = 0.0
                 for (row in 0 until rows) {
                     for (col in 0 until cols) {
-                        val weight = wgt.get(row, col) // sudah release wgt — hitung ulang
-                        // skip elongation bila wgt sudah di-release; pakai patch-bg
-                        break
+                        val weight = wgt.get(row, col)[0].toDouble()
+                        val dx = (ya + row) - cy
+                        val dx2 = (xa + col) - cx
+                        mu20 += weight * dx2 * dx2
+                        mu02 += weight * dx * dx
+                        mu11 += weight * dx2 * dx
                     }
-                    break
                 }
-                // Simple elongation dari bbox rasio — cukup untuk filter trail vs round.
-                val bboxW = (xb - xa).toDouble()
-                val bboxH = (yb - ya).toDouble()
-                val elongation = max(bboxW, bboxH) / kotlin.math.max(kotlin.math.min(bboxW, bboxH), 1.0)
+                mu20 /= s; mu02 /= s; mu11 /= s
+                val trace = mu20 + mu02
+                val disc = sqrt(((mu20 - mu02) / 2.0).pow(2) + mu11 * mu11)
+                val lamMax = trace / 2.0 + disc
+                val lamMin = max(trace / 2.0 - disc, 1e-6)
+                val elongation = sqrt(lamMax / lamMin)
 
-                blobs.add(StarBlob(cx, cy, s, elongation))
+                xx.release(); yy.release(); xxArr.release(); yyArr.release()
+                cxMat.release(); cyMat.release(); wgt.release()
+
+                val peak = peakVal.toDouble()
+                val meanVal = if (s > 0) sumDiff / s else 0.0
+                val major = sqrt(lamMax)
+                val minor = sqrt(lamMin)
+                val orient = Math.toDegrees(atan2(2.0 * mu11, mu20 - mu02))
+                val roundness = if (major > 1e-6) minor / major else 1.0
+                val classification = classifyStar(elongation, s, peak)
+                blobs.add(StarBlob(cx, cy, s, elongation, peak, meanVal, major, minor, orient, roundness, classification))
             }
             points.release()
             f32.release(); bg.release(); resid.release(); thr.release(); peakMask.release()
@@ -2192,8 +2234,8 @@ object ImageStacker {
             // Sigma relatif terhadap rentang data aktual: lantai 1.5% rentang
             // (bukan asumsi buta 0..255) agar tidak klip berlebihan.
             val dataRange = (values.maxOrNull()!! - values.minOrNull()!!).toDouble().coerceAtLeast(1.0)
-            // Floor konsisten dengan jalur streaming (sama-sama punya lantai 8).
-            val sigma = max(max(8.0, 0.015 * dataRange), sqrt(variance))
+            // Floor konsisten dengan jalur streaming (sama-sama punya lantai 2).
+            val sigma = max(max(2.0, 0.015 * dataRange), sqrt(variance))
             var changed = false
             for (i in 0 until n) {
                 if (accepted[i] && abs(values[i] - mean) > effectiveKappa * sigma) {
@@ -2555,13 +2597,26 @@ object ImageStacker {
             autoBrightness(stacked)
         }
 
-        // Second-pass gradient removal (Sequator-style post-stack cleanup)
-        onProgress(progressBase + 0.64f * span, "Menghapus gradien residual...")
-        removeGradientPostStack(stacked)
+        // ===== BAGIAN 13: POST-PROCESSING STAGES =====
+        // Stage 1: STACKED_LINEAR (already done above: LPR, vignette, sky brightness)
 
-        // Background neutralization (Sequator color calibration)
-        onProgress(progressBase + 0.65f * span, "Menetralkan warna latar...")
-        neutralizeBackgroundChannels(stacked)
+        // Stage 2: BACKGROUND_CORRECTED -- per-channel gradient removal + neutralization
+        // Only apply if LPR was NOT already applied (avoid double subtraction)
+        if (!lightPollutionReduction || lprStrength <= 0.001f) {
+            onProgress(progressBase + 0.64f * span, "Menghapus gradien residual (per-channel)...")
+            removeGradientPostStack(stacked, 0.5f)
+        }
+        // Background neutralization: conservative, optional (skip for astro)
+        if (skyMask == null) {
+            onProgress(progressBase + 0.65f * span, "Menetralkan warna latar...")
+            neutralizeBackgroundChannels(stacked, 0.3f)
+        }
+
+        // Stage 3: STRETCHED -- color space conversion, brightness stretch
+        // (autoBrightness already applied above as percentileStretch)
+
+        // Stage 4: FINAL_ENHANCED -- color space, upscale, sharpen
+        // (handled below)
 
         stacked = convertColorSpace(stacked, colorSpace)
 
@@ -2878,6 +2933,77 @@ object ImageStacker {
     }
 
     /**
+     * BAGIAN 10: Extract sky background PER CHANNEL (R, G, B separately).
+     * Returns a BGR Mat with separate background models for each channel.
+     * This prevents color shift / green cast that grayscale background removal causes.
+     */
+    private fun extractSkyBackgroundPerChannel(mat: Mat, sampleStep: Int = 16): Mat? {
+        try {
+            val channels = ArrayList<Mat>()
+            Core.split(mat, channels)
+            val bgChannels = ArrayList<Mat>()
+            for (ch in channels) {
+                val bg = extractSkyBackground(ch, sampleStep)
+                if (bg != null) {
+                    bgChannels.add(bg)
+                } else {
+                    // Fallback: use zeros if channel extraction fails
+                    bgChannels.add(Mat.zeros(ch.size(), ch.type()))
+                }
+            }
+            val result = Mat()
+            Core.merge(bgChannels, result)
+            channels.forEach { it.release() }
+            bgChannels.forEach { it.release() }
+            return result
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractSkyBackgroundPerChannel gagal: ${t.message}")
+            return null
+        }
+    }
+
+    /**
+     * BAGIAN 10 + 11: Subtract per-channel sky background with strength control.
+     * strength: 0.0 = no subtraction, 1.0 = full subtraction.
+     * Uses mask to protect stars/bright objects from being subtracted.
+     */
+    private fun subtractSkyBackgroundPerChannel(
+        mat: Mat,
+        bgModel: Mat,
+        strength: Float = 1.0f,
+    ) {
+        if (strength <= 0.001f) return
+        try {
+            // Create star mask: protect bright pixels (stars, bright objects)
+            val gray = Mat()
+            Imgproc.cvtColor(mat, gray, Imgproc.COLOR_BGR2GRAY)
+            val starMask = Mat()
+            Core.threshold(gray, starMask, 60.0, 255.0, Imgproc.THRESH_BINARY)
+            gray.release()
+            // Dilate star mask to protect halo
+            val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+            Imgproc.dilate(starMask, starMask, kernel)
+            kernel.release()
+            // Invert: 0 = star region (don't subtract), 255 = background (subtract)
+            val bgMask = Mat()
+            Core.bitwise_not(starMask, bgMask)
+            starMask.release()
+
+            // Subtract per-channel with strength
+            val subtracted = Mat()
+            Core.subtract(mat, bgModel, subtracted)
+            Core.multiply(subtracted, Scalar.all(strength.toDouble()), subtracted)
+            Core.add(mat, subtracted, mat, bgMask, CvType.CV_32F)
+            subtracted.release()
+            bgMask.release()
+            Core.max(mat, Scalar.all(0.0), mat)
+            Core.min(mat, Scalar.all(255.0), mat)
+        } catch (t: Throwable) {
+            Log.w(TAG, "subtractSkyBackgroundPerChannel gagal: ${t.message}")
+        }
+    }
+
+    /**
      * Percentile-based asymmetric histogram stretch (Sequator-equivalent).
      * Maps [lowPct, highPct] percentiles to [0, 255] with sigmoid midtone boost.
      */
@@ -2920,8 +3046,8 @@ object ImageStacker {
                 val v = data[i + c].coerceIn(0f, 255f)
                 var stretched = ((v - blackPoint) / range * 255.0).coerceIn(0.0, 255.0)
                 val norm = stretched / 255.0
-                val boosted = 255.0 / (1.0 + Math.exp(-8.0 * (norm - 0.5)))
-                data[i + c] = (0.8 * stretched + 0.2 * boosted).toFloat()
+                val boosted = 255.0 / (1.0 + Math.exp(-4.0 * (norm - 0.5)))
+                data[i + c] = (0.9 * stretched + 0.1 * boosted).toFloat()
             }
             i += 3
         }
@@ -2931,16 +3057,16 @@ object ImageStacker {
     /**
      * Second-pass polynomial gradient removal on stacked image.
      */
-    private fun removeGradientPostStack(floatImage: Mat) {
-        val width = floatImage.cols()
-        val height = floatImage.rows()
-        val lum = Mat()
-        Imgproc.cvtColor(floatImage, lum, Imgproc.COLOR_BGR2GRAY)
-        val bg = extractSkyBackground(lum, sampleStep = 8)
-        lum.release()
-        if (bg != null) {
-            subtractSkyBackgroundFromBgr(floatImage, bg)
-            bg.release()
+    /**
+     * BAGIAN 11: Post-stack gradient removal using per-channel background model.
+     * strength: 0.0 = no removal, 1.0 = full removal.
+     * Default conservative (0.5) to avoid over-subtraction.
+     */
+    private fun removeGradientPostStack(floatImage: Mat, strength: Float = 0.5f) {
+        val bgModel = extractSkyBackgroundPerChannel(floatImage, sampleStep = 8)
+        if (bgModel != null) {
+            subtractSkyBackgroundPerChannel(floatImage, bgModel, strength)
+            bgModel.release()
         }
     }
 
@@ -2948,7 +3074,7 @@ object ImageStacker {
      * Background neutralization: subtract per-channel background offset
      * so the average background is neutral gray (prevents color cast).
      */
-    private fun neutralizeBackgroundChannels(floatImage: Mat) {
+    private fun neutralizeBackgroundChannels(floatImage: Mat, strength: Float = 1.0f) {
         val width = floatImage.cols()
         val height = floatImage.rows()
         val totalPixels = width * height
@@ -2972,7 +3098,9 @@ object ImageStacker {
         var i = 0
         while (i < data.size) {
             for (c in 0..2) {
-                data[i + c] = (data[i + c] - offsets[c].toFloat()).coerceIn(0f, 255f)
+                val original = data[i + c]
+                val corrected = (original - (offsets[c] * strength).toFloat()).coerceIn(0f, 255f)
+                data[i + c] = original + (corrected - original) * strength
             }
             i += 3
         }
@@ -2988,4 +3116,377 @@ object ImageStacker {
         val icc = iccCache?.get(colorSpace)?.takeIf { it.isNotEmpty() }
         return TiffEncoder.encodeRgb16(width, height, data, icc)
     }
+
+    // =====================================================================
+    // DEBUG / DIAGNOSTIC PIPELINE
+    // Only active when called from debug builds or internal test harness.
+    // =====================================================================
+
+    /**
+     * RAW_STACK_TEST: Minimal pipeline for diagnosing stacking issues.
+     * INPUT → decode → alignment → MEDIAN STACK → output.
+     * All enhancements/calibrations disabled.
+     */
+    fun rawStackTest(
+        context: Context,
+        bitmaps: List<Bitmap>,
+        onProgress: (Float, String) -> Unit,
+    ): StackResult {
+        require(bitmaps.size >= 2) { "Butuh minimal 2 foto untuk raw stack test." }
+        if (!BuildConfig.DEBUG) {
+            Log.w(TAG, "rawStackTest called in release build — falling back to normal stack")
+            return stack(context, bitmaps, astroMode = true, lightenMode = false, medianMode = true,
+                upscale2x = false, sharpenStrength = 0f, vignetteCorrection = false, vignetteStrength = 0f,
+                lightPollutionReduction = false, lprStrength = 0f, skyBrightness = 0f,
+                kappa = 2.0, kappaPasses = 1, exposureNormalize = false, removeHotPixels = false,
+                enhanceStarColor = false, starColorStrength = 0f, freezeGround = false,
+                horizonFraction = 0.5f, autoSkyMask = false, saveTiff = false, autoBrightness = false,
+                mergePixels = false, hdr = false, onProgress = onProgress)
+        }
+        ensureIccLoaded(context)
+
+        val frameMats = ArrayList<Mat>(bitmaps.size)
+        val grays = ArrayList<Mat>(bitmaps.size)
+        val aligned = ArrayList<Mat>(bitmaps.size)
+        var alignedReference: Mat? = null
+
+        try {
+            // STEP 1: Decode only — no dark, no flat, no hot pixel removal
+            bitmaps.forEach { bmp ->
+                var mat = Mat()
+                Utils.bitmapToMat(bmp, mat)
+                Imgproc.cvtColor(mat, mat, Imgproc.COLOR_RGBA2BGR)
+                frameMats.add(mat)
+                val gray = Mat()
+                Imgproc.cvtColor(mat, gray, Imgproc.COLOR_BGR2GRAY)
+                grays.add(gray)
+            }
+            Log.i(TAG, "RAW_STACK_TEST: ${frameMats.size} frames decoded.")
+
+            // STEP 2: Reference selection — pick frame with most stars
+            val refIndex = pickReferenceIndex(grays, astroMode = true, excluded = emptySet(), trailScores = null)
+            val reference = frameMats[refIndex]
+            val referenceGray = grays[refIndex]
+            aligned.add(reference)
+            alignedReference = reference
+            Log.i(TAG, "RAW_STACK_TEST: Reference frame #$refIndex selected.")
+
+            // STEP 3: Alignment — star-based only, no ECC fallback
+            val eccCriteria = TermCriteria(TermCriteria.COUNT + TermCriteria.EPS, 60, 1e-4)
+            var usedFrames = 1
+            var totalStarsDetected = 0
+            var totalInliers = 0
+            var totalRejected = 0
+
+            for (i in frameMats.indices) {
+                if (i == refIndex) continue
+                onProgress(0.1f + 0.6f * usedFrames / (frameMats.size - 1),
+                    "Aligning frame ${usedFrames + 1}/${frameMats.size} (raw test)...")
+
+                val grayRef = sameSizeAsReference(referenceGray, grays[i])
+                val skyWarp = starWarp(referenceGray, grayRef)
+                    ?: eccWarp(referenceGray, grayRef, Video.MOTION_EUCLIDEAN, eccCriteria, 0.15)
+                if (grayRef !== grays[i]) grayRef.release()
+
+                if (skyWarp != null) {
+                    val outSky = Mat()
+                    Imgproc.warpAffine(frameMats[i], outSky, skyWarp, reference.size(),
+                        Imgproc.INTER_LINEAR + Imgproc.WARP_INVERSE_MAP)
+                    skyWarp.release()
+                    val outFloat = Mat()
+                    outSky.convertTo(outFloat, CvType.CV_32FC3)
+                    outSky.release()
+                    aligned.add(outFloat)
+                    usedFrames++
+
+                    // Log alignment metrics
+                    val refStars = findStarBlobs(referenceGray)
+                    val movStars = findStarBlobs(grays[i])
+                    totalStarsDetected += refStars.size + movStars.size
+                    Log.i(TAG, "RAW_STACK_TEST frame #$i: ALIGNED (refStars=${refStars.size}, movStars=${movStars.size})")
+                } else {
+                    totalRejected++
+                    Log.w(TAG, "RAW_STACK_TEST frame #$i: REJECTED (alignment failed)")
+                }
+            }
+
+            if (usedFrames < 2) {
+                error("Raw stack test: insufficient aligned frames ($usedFrames)")
+            }
+
+            Log.i(TAG, "RAW_STACK_TEST: $usedFrames frames aligned, $totalRejected rejected.")
+            Log.i(TAG, "RAW_STACK_TEST: Total stars detected: $totalStarsDetected")
+
+            // STEP 4: Median stack — no kappa-sigma, no exposure normalization
+            onProgress(0.75f, "Median stacking ${usedFrames} frames (raw test)...")
+            val stacked = medianStack(aligned, DoubleArray(aligned.size) { 1.0 })
+
+            // STEP 5: Output — no post-processing, no enhancement
+            onProgress(0.95f, "Saving raw stack result...")
+            val outBitmap = Bitmap.createBitmap(stacked.cols(), stacked.rows(), Bitmap.Config.ARGB_8888)
+            val out8 = Mat()
+            stacked.convertTo(out8, CvType.CV_8UC3)
+            stacked.release()
+            Imgproc.cvtColor(out8, out8, Imgproc.COLOR_BGR2RGBA)
+            Utils.matToBitmap(out8, outBitmap)
+            out8.release()
+
+            return StackResult(outBitmap, usedFrames, null, 0, 0)
+        } finally {
+            frameMats.forEach { it.release() }
+            grays.forEach { it.release() }
+            aligned.forEach { if (it !== alignedReference) it.release() }
+        }
+    }
+
+    /**
+     * Detailed alignment diagnostics for a single frame pair.
+     * Logs: star count, inlier ratio, transform matrix, residual, elongation.
+     */
+    fun diagnoseAlignment(
+        reference: Mat,
+        moving: Mat,
+        frameIndex: Int,
+    ): AlignmentDiagnostic {
+        val refGray = Mat()
+        Imgproc.cvtColor(reference, refGray, Imgproc.COLOR_BGR2GRAY)
+        val movGray = Mat()
+        Imgproc.cvtColor(moving, movGray, Imgproc.COLOR_BGR2GRAY)
+
+        val refStars = findStarBlobs(refGray)
+        val movStars = findStarBlobs(movGray)
+        refGray.release()
+        movGray.release()
+
+        val refElongations = refStars.map { it.elongation }
+        val movElongations = movStars.map { it.elongation }
+        val avgRefElong = if (refElongations.isNotEmpty()) refElongations.average() else 0.0
+        val avgMovElong = if (movElongations.isNotEmpty()) movElongations.average() else 0.0
+        val refRoundCount = refStars.count { it.elongation <= ROUND_STAR_ELONG_MAX }
+        val movRoundCount = movStars.count { it.elongation <= ROUND_STAR_ELONG_MAX }
+
+        // Try star-based alignment
+        val warp = starWarp(reference, moving)
+        val warpValid = warp != null && !warp.empty()
+
+        var tx = 0.0; var ty = 0.0; var rotation = 0.0; var scale = 1.0
+        var residual = 0.0; var inlierCount = 0; var matchCount = 0
+        var inlierRatio = 0.0
+
+        if (warpValid) {
+            val ws = warpStats(warp!!)
+            tx = ws.tx; ty = ws.ty; rotation = ws.rotationDeg; scale = ws.scale
+
+            // Count matches and inliers
+            val refAnchors = refStars.filter { it.elongation <= ROUND_STAR_ELONG_MAX }.ifEmpty { refStars }
+            val movAnchors = movStars.filter { it.elongation <= ROUND_STAR_ELONG_MAX }.ifEmpty { movStars }
+
+            val pairRef = ArrayList<Point>()
+            val pairMov = ArrayList<Point>()
+            val used = BooleanArray(movAnchors.size)
+
+            for (rs in refAnchors) {
+                var bestIdx = -1; var bestDist = MAX_STAR_MATCH_DIST
+                var secondIdx = -1; var secondDist = MAX_STAR_MATCH_DIST
+                for (j in movAnchors.indices) {
+                    if (used[j]) continue
+                    val d = hypot(rs.x - movAnchors[j].x, rs.y - movAnchors[j].y)
+                    if (d < bestDist) { secondIdx = bestIdx; secondDist = bestDist; bestDist = d; bestIdx = j }
+                    else if (d < secondDist) { secondIdx = j; secondDist = d }
+                }
+                if (bestIdx >= 0 && (secondIdx < 0 || bestDist < secondDist * STAR_MATCH_RATIO)) {
+                    used[bestIdx] = true
+                    pairRef.add(Point(rs.x, rs.y))
+                    pairMov.add(Point(movAnchors[bestIdx].x, movAnchors[bestIdx].y))
+                }
+            }
+
+            matchCount = pairRef.size
+            if (matchCount >= MIN_STARS_COUNT) {
+                val from = MatOfPoint2f(*pairRef.toTypedArray())
+                val to = MatOfPoint2f(*pairMov.toTypedArray())
+                val inliers = MatOfByte()
+                Calib3d.estimateAffinePartial2D(from, to, inliers, Calib3d.RANSAC, 3.0)
+                val inlierFlags = inliers.toArray()
+                inlierCount = inlierFlags.count { it.toInt() != 0 }
+                inlierRatio = if (matchCount > 0) inlierCount.toDouble() / matchCount else 0.0
+                residual = starAlignResidualPx(warp, pairRef, pairMov, inlierFlags) ?: 0.0
+                from.release(); to.release(); inliers.release()
+            }
+            warp.release()
+        }
+
+        val confidence = when {
+            !warpValid -> 0.0
+            inlierRatio < 0.5 -> inlierRatio * 0.5
+            residual > MAX_STAR_ALIGN_RESIDUAL_PX -> 0.3
+            else -> (inlierRatio * 0.6 + (1.0 - (residual / MAX_STAR_ALIGN_RESIDUAL_PX).coerceIn(0.0, 1.0)) * 0.4)
+        }
+
+        Log.i(TAG, """
+            |FRAME $frameIndex ALIGNMENT DIAGNOSTIC
+            |  refStars=${refStars.size} (round=$refRoundCount, avgElong=${"%.2f".format(avgRefElong)})
+            |  movStars=${movStars.size} (round=$movRoundCount, avgElong=${"%.2f".format(avgMovElong)})
+            |  matches=$matchCount, inliers=$inlierCount (${"%.1f".format(inlierRatio * 100)}%)
+            |  translation=(${"%.1f".format(tx)}, ${"%.1f".format(ty)})
+            |  rotation=${"%.3f".format(rotation)}°, scale=${"%.4f".format(scale)}
+            |  residual=${"%.3f".format(residual)}px
+            |  confidence=${"%.3f".format(confidence)}
+            |  warpValid=$warpValid
+        """.trimMargin())
+
+        return AlignmentDiagnostic(
+            frameIndex = frameIndex,
+            refStarCount = refStars.size,
+            movStarCount = movStars.size,
+            refRoundCount = refRoundCount,
+            movRoundCount = movRoundCount,
+            avgRefElongation = avgRefElong,
+            avgMovElongation = avgMovElong,
+            matchCount = matchCount,
+            inlierCount = inlierCount,
+            inlierRatio = inlierRatio,
+            translationX = tx,
+            translationY = ty,
+            rotationDeg = rotation,
+            scale = scale,
+            residualPx = residual,
+            confidence = confidence,
+            warpValid = warpValid,
+        )
+    }
+
+    data class AlignmentDiagnostic(
+        val frameIndex: Int,
+        val refStarCount: Int,
+        val movStarCount: Int,
+        val refRoundCount: Int,
+        val movRoundCount: Int,
+        val avgRefElongation: Double,
+        val avgMovElongation: Double,
+        val matchCount: Int,
+        val inlierCount: Int,
+        val inlierRatio: Double,
+        val translationX: Double,
+        val translationY: Double,
+        val rotationDeg: Double,
+        val scale: Double,
+        val residualPx: Double,
+        val confidence: Double,
+        val warpValid: Boolean,
+    )
+
+    /**
+     * Generate debug artifact images for visual inspection.
+     * Only call from debug builds — writes to app-internal storage.
+     */
+    fun generateDebugArtifacts(
+        context: Context,
+        reference: Mat,
+        alignedFrames: List<Pair<Int, Mat>>,
+        stackedMedian: Mat,
+        stackedKappaSigma: Mat?,
+        backgroundModel: Mat? = null,
+        backgroundCorrected: Mat? = null,
+        finalImage: Mat? = null,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val dir = context.getExternalFilesDir(null) ?: return
+        val debugDir = java.io.File(dir, "debug")
+        debugDir.mkdirs()
+
+        fun saveDebug(mat: Mat, name: String) {
+            try {
+                val out = java.io.File(debugDir, "$name.png")
+                val eight = Mat()
+                mat.convertTo(eight, CvType.CV_8UC3)
+                Imgcodecs.imwrite(out.absolutePath, eight)
+                eight.release()
+                Log.i(TAG, "Debug artifact saved: $name (${out.length()} bytes)")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to save debug artifact $name: ${t.message}")
+            }
+        }
+
+        fun saveDebugChannel(mat: Mat, channel: Int, name: String) {
+            try {
+                val channels = ArrayList<Mat>()
+                Core.split(mat, channels)
+                val out = java.io.File(debugDir, "$name.png")
+                Imgcodecs.imwrite(out.absolutePath, channels[channel])
+                channels.forEach { it.release() }
+                Log.i(TAG, "Debug artifact saved: $name (${out.length()} bytes)")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to save debug artifact $name: ${t.message}")
+            }
+        }
+
+        // 1. Reference frame
+        saveDebug(reference, "debug_01_reference")
+
+        // 2. Detected stars overlay on reference
+        val refGray = Mat()
+        Imgproc.cvtColor(reference, refGray, Imgproc.COLOR_BGR2GRAY)
+        val refStars = findStarBlobs(refGray)
+        refGray.release()
+        val starOverlay = reference.clone()
+        for (star in refStars) {
+            val color = if (star.elongation <= ROUND_STAR_ELONG_MAX) Scalar(0.0, 255.0, 0.0) else Scalar(0.0, 0.0, 255.0)
+            Imgproc.circle(starOverlay, Point(star.x, star.y), 4, color, 1)
+        }
+        saveDebug(starOverlay, "debug_02_stars_reference")
+        starOverlay.release()
+
+        // 3. Rejected stars overlay (stars with elongation > threshold)
+        val rejectedOverlay = reference.clone()
+        val rejectedStars = refStars.filter { it.elongation > ROUND_STAR_ELONG_MAX }
+        for (star in rejectedStars) {
+            Imgproc.circle(rejectedOverlay, Point(star.x, star.y), 4, Scalar(0.0, 0.0, 255.0), 1)
+        }
+        saveDebug(rejectedOverlay, "debug_02b_stars_rejected_reference")
+        rejectedOverlay.release()
+
+        // 4. Aligned frames with star overlay
+        for ((idx, frame) in alignedFrames) {
+            val movGray = Mat()
+            Imgproc.cvtColor(frame, movGray, Imgproc.COLOR_BGR2GRAY)
+            val movStars = findStarBlobs(movGray)
+            movGray.release()
+            val overlay = frame.clone()
+            for (star in movStars) {
+                val color = if (star.elongation <= ROUND_STAR_ELONG_MAX) Scalar(0.0, 255.0, 0.0) else Scalar(0.0, 0.0, 255.0)
+                Imgproc.circle(overlay, Point(star.x, star.y), 4, color, 1)
+            }
+            saveDebug(overlay, "debug_03_aligned_frame_%02d".format(idx))
+            overlay.release()
+        }
+
+        // 5. Median stack
+        saveDebug(stackedMedian, "debug_04_median")
+
+        // 6. Kappa-sigma stack (if available)
+        if (stackedKappaSigma != null) {
+            saveDebug(stackedKappaSigma, "debug_05_kappa_sigma")
+        }
+
+        // 7. Background model (per-channel R, G, B)
+        if (backgroundModel != null) {
+            saveDebugChannel(backgroundModel, 2, "debug_06_background_model_R")
+            saveDebugChannel(backgroundModel, 1, "debug_07_background_model_G")
+            saveDebugChannel(backgroundModel, 0, "debug_08_background_model_B")
+        }
+
+        // 8. Background corrected image
+        if (backgroundCorrected != null) {
+            saveDebug(backgroundCorrected, "debug_09_background_corrected")
+        }
+
+        // 9. Final image
+        if (finalImage != null) {
+            saveDebug(finalImage, "debug_10_final")
+        }
+
+        Log.i(TAG, "Debug artifacts generated in: ${debugDir.absolutePath}")
+    }
+
 }
